@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:hospital_test_db;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  task:
+    scheduling:
+      pool:
+        size: 2
+
+logging:
+  level:
+    com.healthcare.ecosystem.allocation: DEBUG
+
+allocation:
+  reservation:
+    timeout-minutes: 15
+    # Effectively disable the expiry sweep during tests so it cannot race with assertions.
+    cleanup-cron: "0 0 0 1 1 *"

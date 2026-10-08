@@ -1,0 +1,42 @@
+server:
+  port: 8080
+  error:
+    include-message: always
+
+spring:
+  application:
+    name: hospital-bed-allocation-engine
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:hospital_allocation_db}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:2004}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
+  task:
+    scheduling:
+      pool:
+        size: 5
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+allocation:
+  reservation:
+    timeout-minutes: 15
+    cleanup-cron: "0 */1 * * * *"   # every minute

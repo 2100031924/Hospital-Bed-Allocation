@@ -1,0 +1,318 @@
+{
+  "info": {
+    "_postman_id": "a9c7b941-8c4d-4813-8822-6b92f7e71c21",
+    "name": "Hospital Bed & Resource Allocation Engine",
+    "description": "Production test collection covering admission lifecycle, concurrency, waiting-list, and discharge workflows.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "hospitalId", "value": "1" },
+    { "key": "wardId", "value": "1" },
+    { "key": "roomId", "value": "1" },
+    { "key": "bedId", "value": "1" },
+    { "key": "admissionId", "value": "1" }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Capture created ids into collection variables for chained requests",
+          "if (pm.response.code === 201 || pm.response.code === 200) {",
+          "  var j = pm.response.json();",
+          "  if (j && j.data) {",
+          "    if (j.data.id !== undefined && j.data.hospitalId === undefined) pm.collectionVariables.set('wardId', j.data.id);",
+          "    if (j.data.id !== undefined && j.data.wardId !== undefined && j.data.roomNumber) pm.collectionVariables.set('roomId', j.data.id);",
+          "    if (j.data.bedId !== undefined) pm.collectionVariables.set('bedId', j.data.bedId);",
+          "    if (j.data.admissionId !== undefined) pm.collectionVariables.set('admissionId', j.data.admissionId);",
+          "    if (j.data.hospitalId !== undefined && j.data.wardType === undefined) pm.collectionVariables.set('hospitalId', j.data.id);",
+          "  }",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Hospital & Room Setup",
+      "item": [
+        {
+          "name": "Create Hospital",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"HOSP-NEW\",\n  \"name\": \"City General Hospital\",\n  \"address\": \"12 Park Road\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/hospitals",
+            "description": "Code is normalised to uppercase. Duplicate codes are rejected with 409."
+          }
+        },
+        {
+          "name": "List Hospitals",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/hospitals" }
+        },
+        {
+          "name": "Get Hospital",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/hospitals/{{hospitalId}}" }
+        },
+        {
+          "name": "Create Room (isolation)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"wardId\": 1,\n  \"roomNumber\": \"ISO-ROOM-1\",\n  \"isolationRoom\": true\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/rooms",
+            "description": "Isolation rooms are exclusive: only isolation patients may occupy them."
+          }
+        },
+        {
+          "name": "Create Room (general)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"wardId\": 1,\n  \"roomNumber\": \"GEN-ROOM-1\",\n  \"isolationRoom\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/rooms"
+          }
+        },
+        {
+          "name": "Get Room",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/rooms/{{roomId}}" }
+        },
+        {
+          "name": "List Rooms in Ward",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/rooms/ward/{{wardId}}" }
+        }
+      ]
+    },
+    {
+      "name": "2. Ward & Bed Setup",
+      "item": [
+        {
+          "name": "Create Ward",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hospitalId\": 1,\n  \"name\": \"Emergency ICU\",\n  \"wardType\": \"ICU\",\n  \"genderPolicy\": \"UNISEX\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/wards",
+            "description": "Creates a ward inside an existing hospital. Returns 201 with the new wardId."
+          }
+        },
+        {
+          "name": "Get Ward",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/wards/{{wardId}}"
+          }
+        },
+        {
+          "name": "Create Bed",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roomId\": 1,\n  \"bedNumber\": \"ICU-BED-01\",\n  \"bedType\": \"ICU\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/beds"
+          }
+        },
+        {
+          "name": "List Beds By Ward",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/wards/{{wardId}}/beds"
+          }
+        },
+        {
+          "name": "Get Bed",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/beds/{{bedId}}"
+          }
+        },
+        {
+          "name": "Search Available Beds (bed type + isolation)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/beds/available?bedType=ICU&isolationRequired=false",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "beds", "available"],
+              "query": [
+                { "key": "bedType", "value": "ICU" },
+                { "key": "isolationRequired", "value": "false" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Available Beds for a FEMALE patient",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/beds/available?patientGender=FEMALE",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "beds", "available"],
+              "query": [{ "key": "patientGender", "value": "FEMALE" }]
+            },
+            "description": "Returns beds whose ward gender policy admits a female patient (UNISEX + FEMALE_ONLY)."
+          }
+        },
+        {
+          "name": "Search Available Beds for a MALE patient",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/beds/available?patientGender=MALE",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "beds", "available"],
+              "query": [{ "key": "patientGender", "value": "MALE" }]
+            },
+            "description": "Excludes FEMALE_ONLY wards."
+          }
+        },
+        {
+          "name": "Search: maternity ward beds for female patient",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/beds/available?wardType=MATERNITY&patientGender=FEMALE",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "beds", "available"],
+              "query": [
+                { "key": "wardType", "value": "MATERNITY" },
+                { "key": "patientGender", "value": "FEMALE" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Bed Stats",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/beds/stats"
+          }
+        },
+        {
+          "name": "Block Bed",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/beds/{{bedId}}/block?reason=Broken%20rail"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Admission & Allocation Flow",
+      "item": [
+        {
+          "name": "Request Admission (Emergency)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patientId\": \"PAT-90812\",\n  \"patientGender\": \"MALE\",\n  \"requiredWardType\": \"ICU\",\n  \"requiredBedType\": \"ICU\",\n  \"priority\": \"EMERGENCY\",\n  \"isolationRequired\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/admissions/request",
+            "description": "Runs the allocation engine. Returns RESERVED when a bed was assigned, WAITING_LIST otherwise."
+          }
+        },
+        {
+          "name": "Get Admission by ID",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admissions/{{admissionId}}"
+          }
+        },
+        {
+          "name": "List Active Admissions for Patient",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/v1/admissions/patient/PAT-90812"
+          }
+        },
+        {
+          "name": "Manually Reserve a Bed",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admissions/{{admissionId}}/reserve?bedId={{bedId}}",
+            "description": "Only allowed while the admission is PENDING or WAITING_LIST. Rejects with 422 if the bed is not eligible."
+          }
+        },
+        {
+          "name": "Confirm Patient Arrival (RESERVED -> OCCUPIED)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admissions/{{admissionId}}/confirm"
+          }
+        },
+        {
+          "name": "Discharge Patient (OCCUPIED -> MAINTENANCE)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admissions/{{admissionId}}/discharge"
+          }
+        },
+        {
+          "name": "Complete Bed Cleaning (MAINTENANCE -> AVAILABLE)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/beds/{{bedId}}/maintenance/complete",
+            "description": "Releases the bed and immediately evaluates the waiting list."
+          }
+        },
+        {
+          "name": "Cancel Admission (releases bed immediately)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/v1/admissions/{{admissionId}}/cancel?reason=Patient%20absconded"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Concurrency / Waiting List",
+      "item": [
+        {
+          "name": "Fire 10 Admission Requests (Postman Runner)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patientId\": \"PAT-{{$randomInt}}\",\n  \"patientGender\": \"MALE\",\n  \"requiredWardType\": \"ICU\",\n  \"requiredBedType\": \"ICU\",\n  \"priority\": \"EMERGENCY\",\n  \"isolationRequired\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/admissions/request",
+            "description": "Run with the collection runner, 10 iterations, 10 parallel requests. Exactly 1 RESERVED, 9 WAITING_LIST for a single ICU bed."
+          }
+        },
+        {
+          "name": "Isolation Patient Request",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patientId\": \"PAT-ISO-1\",\n  \"patientGender\": \"FEMALE\",\n  \"requiredWardType\": \"ICU\",\n  \"requiredBedType\": \"ICU\",\n  \"priority\": \"EMERGENCY\",\n  \"isolationRequired\": true\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/admissions/request"
+          }
+        }
+      ]
+    }
+  ]
+}
