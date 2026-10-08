@@ -46,93 +46,158 @@
 │                           SERVICE LAYER (Transaction Boundary)                       │
 │  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────────┐   │
 │  │ BedManagementService │  │ AdmissionService     │  │ WaitingListService       │   │
+│  │ (Hospital/Ward/Room/ │  │ (Admission lifecycle │  │ (Enqueue + Evaluate      │   │
+│  │  Bed CRUD + Search)  │  │  + Allocation trigger)│  │  waiting list)           │   │
 │  └──────────┬───────────┘  └──────────┬───────────┘  └───────────┬──────────────┘   │
+│             │                         │                          │                   │
+│             │              ┌──────────▼───────────┐              │                   │
+│             │              │ BedAllocationEngine  │              │                   │
+│             │              │ (7 eligibility rules │              │                   │
+│             │              │  + PESSIMISTIC_WRITE │              │                   │
+│             │              │  lock per candidate) │              │                   │
+│             │              └──────────┬───────────┘              │                   │
 └─────────────┼──────────────────────────┼──────────────────────────┼───────────────────┘
               │                          │                          │
               ▼                          ▼                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           REPOSITORY LAYER (Spring Data JPA)                          │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐  │
+│  │ Hospital     │ │ Ward         │ │ Room         │ │ Bed          │ │ Admission  │  │
+│  │ Repository   │ │ Repository   │ │ Repository   │ │ Repository   │ │ Repository │  │
+│  └──────────────┘ └──────────────┘ └──────────────┘ └──────┬───────┘ └─────┬──────┘  │
+│  ┌──────────────┐ ┌──────────────┐                          │               │        │
+│  │ WaitingList  │ │ BedStatusLog │                          │               │        │
+│  │ Repository   │ │ Repository   │                          │               │        │
+│  └──────────────┘ └──────────────┘                          │               │        │
+└─────────────────────────────────────────────────────────────┼───────────────┼─────────┘
+                                                              │               │
+                                                              ▼               ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                              DATABASE LAYER                                           │
 │                    MySQL 8 / InnoDB  (H2 in MySQL mode for tests)                     │
+│  ┌──────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────────┐ ┌──────────────┐       │
+│  │hospitals │ │ wards  │ │ rooms  │ │ beds   │ │admissions  │ │waiting_list  │       │
+│  └──────────┘ └────────┘ └────────┘ └────────┘ └────────────┘ └──────────────┘       │
+│  ┌────────────────┐                                                                   │
+│  │bed_status_logs │                                                                   │
+│  └────────────────┘                                                                   │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
 
 ### 1.2 Admission Allocation Flow (Automatic)
 
-CLIENT: POST /api/v1/admissions/request
-Body: { patientId, patientGender, requiredWardType, requiredBedType,
-        priority, isolationRequired }   ← NO bedId!
-
-        │
-        ▼
-AdmissionController.requestAdmission()
-→ @Valid validates DTO (Bean Validation)
-
-        │
-        ▼
-AdmissionServiceImpl.createAdmissionRequest()
-@Transactional(isolation = READ_COMMITTED)
-1. Save new Admission with status = PENDING
-2. Call BedAllocationEngine.allocateBed(admission)
-
-        │
-        ▼
-BedAllocationEngineImpl.allocateBed()
-1. findEligibleCandidateBedIds(wardType, bedType, isolationRequired)
-2. FOR EACH candidate bed ID:
-   a. findByIdWithPessimisticLock(candidateId)  ← PESSIMISTIC_WRITE
-   b. IF lock acquired: re-check isBedEligibleForAdmission
-   c. IF lock conflict → skip candidate, try next
-3. IF no eligible bed found → return Optional.empty()
-
-        │
-   ┌────┴────┐
-   ▼         ▼
-BED FOUND   NO BED FOUND
-           waitingListService.enqueue(admission)
-           admission.setStatus(WAITING_LIST)
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  CLIENT: POST /api/v1/admissions/request                                             │
+│  Body: { patientId, patientGender, requiredWardType, requiredBedType,                │
+│          priority, isolationRequired }   ← NO bedId!                                 │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  AdmissionController.requestAdmission()                                              │
+│  → @Valid validates DTO (Bean Validation)                                            │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  AdmissionServiceImpl.createAdmissionRequest()                                       │
+│  @Transactional(isolation = READ_COMMITTED)                                           │
+│                                                                                      │
+│  1. Save new Admission with status = PENDING                                         │
+│  2. Call BedAllocationEngine.allocateBed(admission)                                  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  BedAllocationEngineImpl.allocateBed()                                               │
+│                                                                                      │
+│  1. findEligibleCandidateBedIds(wardType, bedType, isolationRequired)                │
+│     → SELECT b.id FROM beds b JOIN rooms r JOIN wards w                              │
+│       WHERE w.ward_type = :wardType AND b.bed_type = :bedType                         │
+│       AND r.is_isolation_room = :isolationRequired                                    │
+│       AND b.status = 'AVAILABLE'                                                      │
+│       ORDER BY b.id ASC                                                               │
+│                                                                                      │
+│  2. FOR EACH candidate bed ID:                                                        │
+│     a. findByIdWithPessimisticLock(candidateId)  ← PESSIMISTIC_WRITE                 │
+│        (SELECT ... FOR UPDATE, lock timeout = 0)                                      │
+│     b. IF lock acquired:                                                              │
+│        - Re-check isBedEligibleForAdmission(lockedBed, admission)                     │
+│        - IF eligible → return Optional.of(lockedBed)                                  │
+│     c. IF lock conflict → skip candidate, try next                                    │
+│                                                                                      │
+│  3. IF no eligible bed found → return Optional.empty()                                │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+┌───────────────────────────────┐         ┌───────────────────────────────────────────┐
+│  BED FOUND                    │         │  NO BED FOUND                             │
+│                               │         │                                           │
+│  - bed.setStatus(RESERVED)    │         │  waitingListService.enqueue(admission)    │
+│  - admission.setStatus(       │         │  - admission.setStatus(WAITING_LIST)      │
+│      RESERVED)                │         │  - Create WaitingListEntry with           │
+│  - admission.setAllocatedBed  │         │    priorityScore = priority.weight        │
+│      (bed)                    │         │  - enqueuedAt = now                       │
+│  - admission.setReservation   │         │                                           │
+│      ExpiresAt(now + 15 min)  │         │  Return AdmissionResponse with            │
+│  - Save BedStatusLog          │         │  status = WAITING_LIST,                   │
+│  - Return AdmissionResponse   │         │  allocatedBedId = null                    │
+│    with status = RESERVED,    │         │                                           │
+│    allocatedBedId = bed.id    │         │                                           │
+└───────────────────────────────┘         └───────────────────────────────────────────┘
 
 
 ### 1.3 Bed Eligibility Rules (7 Rules in isBedEligibleForAdmission)
 
-RULE 1: Status Check
-  bed.status must be AVAILABLE
-  (BLOCKED, MAINTENANCE, RESERVED, OCCUPIED → reject)
-
-RULE 2: Existing Reservation / Occupancy Check (Defence in Depth)
-  No Admission with status IN (RESERVED, ADMITTED) already references this bed
-
-RULE 3: Required Ward Type Match
-  ward.wardType == admission.requiredWardType
-
-RULE 4: Required Bed Type Match
-  bed.bedType == admission.requiredBedType
-
-RULE 5: Ward Gender Policy Check
-  - MALE_ONLY ward → patient must be MALE
-  - FEMALE_ONLY ward → patient must be FEMALE
-  - UNISEX ward → all genders allowed
-
-RULE 6: Isolation Compatibility Check
-  - isolationRequired = true → room.isIsolationRoom must be true
-  - isolationRequired = false → room.isIsolationRoom must be false
-
-RULE 7: Room Gender Compatibility (Multi-bed non-isolation rooms)
-  For each active bed in the same room:
-    - Find its active admission
-    - If activeAdmission.patientGender != newAdmission.patientGender → reject
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  RULE 1: Status Check                                                                │
+│  bed.status must be AVAILABLE                                                        │
+│  (BLOCKED, MAINTENANCE, RESERVED, OCCUPIED → reject)                                 │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 2: Existing Reservation / Occupancy Check (Defence in Depth)                   │
+│  No Admission with status IN (RESERVED, ADMITTED) already references this bed         │
+│  → findByAllocatedBedIdAndStatusIn(bedId, [RESERVED, ADMITTED])                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 3: Required Ward Type Match                                                    │
+│  ward.wardType == admission.requiredWardType                                         │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 4: Required Bed Type Match                                                     │
+│  bed.bedType == admission.requiredBedType                                            │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 5: Ward Gender Policy Check                                                    │
+│  - MALE_ONLY ward → patient must be MALE                                             │
+│  - FEMALE_ONLY ward → patient must be FEMALE                                         │
+│  - UNISEX ward → all genders allowed                                                 │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 6: Isolation Compatibility Check                                               │
+│  - isolationRequired = true → room.isIsolationRoom must be true                      │
+│    AND room must have ZERO active (RESERVED/OCCUPIED) beds                           │
+│  - isolationRequired = false → room.isIsolationRoom must be false                    │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  RULE 7: Room Gender Compatibility (Multi-bed non-isolation rooms)                   │
+│  For each active bed in the same room:                                               │
+│    - Find its active admission                                                        │
+│    - If activeAdmission.patientGender != newAdmission.patientGender → reject          │
+│  (Prevents co-ed placement in shared rooms)                                          │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
 
 ### 1.4 Full Bed Lifecycle State Machine
 
-BED STATES
-AVAILABLE ──► RESERVED ──► OCCUPIED ──► MAINTENANCE
-     ▲            │            │              │
-     │            ▼            ▼              ▼
-     │        AVAILABLE    BLOCKED       AVAILABLE
-     │        (expiry)
-     └────────────────────────────────────────┘
-              MAINTENANCE → AVAILABLE
-              BLOCKED → AVAILABLE
+                    ┌─────────────────────────────────────────────────────────┐
+                    │                    BED STATES                            │
+                    │  AVAILABLE ──► RESERVED ──► OCCUPIED ──► MAINTENANCE    │
+                    │       ▲            │            │              │         │
+                    │       │            │            │              │         │
+                    │       │            ▼            ▼              ▼         │
+                    │       │        AVAILABLE    BLOCKED       AVAILABLE     │
+                    │       │        (expiry)                               │
+                    │       │                                               │
+                    │       └───────────────────────────────────────────────┘
+                    │                    MAINTENANCE → AVAILABLE
+                    │                    BLOCKED → AVAILABLE
+                    └─────────────────────────────────────────────────────────┘
 
 Admission → Bed State Mapping:
 
@@ -142,73 +207,121 @@ Admission → Bed State Mapping:
 | POST /request (no bed) | PENDING → WAITING_LIST | — |
 | POST /{id}/confirm | RESERVED → ADMITTED | RESERVED → OCCUPIED |
 | POST /{id}/discharge | ADMITTED → DISCHARGED | OCCUPIED → MAINTENANCE |
-| POST /beds/{id}/maintenance/complete | — | MAINTENANCE → AVAILABLE |
+| POST /beds/{id}/maintenance/complete | — | MAINTENANCE → AVAILABLE (or RESERVED if waiting list assigns) |
 | POST /{id}/cancel | Any active → CANCELLED | RESERVED/OCCUPIED → AVAILABLE |
 | Scheduler (expiry) | RESERVED → EXPIRED | RESERVED → AVAILABLE |
 
 
 ### 1.5 Waiting List Evaluation Flow
 
-TRIGGER: evaluateWaitingListForBed(releasedBed)
-Called from:
-  • completeMaintenance()
-  • cancelAdmission()
-  • processExpiredReservations() (scheduler)
-  • Any other path that releases a bed
-
-1. Lock the released bed: findByIdWithPessimisticLock(releasedBed.getId())
-2. Verify bed.status == AVAILABLE
-3. Query waiting list:
-   SELECT w FROM WaitingListEntry w
-   JOIN FETCH w.admission a
-   WHERE a.status = 'WAITING_LIST'
-   ORDER BY w.priorityScore DESC, w.enqueuedAt ASC
-4. FOR EACH waiting entry:
-   a. IF admission.status != WAITING_LIST → delete stale entry, continue
-   b. IF !isBedEligibleForAdmission(bed, admission) → continue
-   c. MATCH FOUND:
-      - bed.setStatus(RESERVED)
-      - admission.setStatus(RESERVED)
-      - admission.setAllocatedBed(bed)
-      - admission.setReservationExpiresAt(now + 15 min)
-      - Delete waiting list entry
-      - Save BedStatusLog
-      - BREAK
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  TRIGGER: evaluateWaitingListForBed(releasedBed)                                     │
+│  Called from:                                                                        │
+│    • completeMaintenance()                                                           │
+│    • cancelAdmission()                                                               │
+│    • processExpiredReservations() (scheduler)                                        │
+│    • Any other path that releases a bed                                              │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  1. Lock the released bed: findByIdWithPessimisticLock(releasedBed.getId())          │
+│  2. Verify bed.status == AVAILABLE (or already reassigned)                           │
+│  3. Query waiting list:                                                              │
+│     SELECT w FROM WaitingListEntry w                                                  │
+│     JOIN FETCH w.admission a                                                         │
+│     WHERE a.status = 'WAITING_LIST'                                                  │
+│     ORDER BY w.priorityScore DESC, w.enqueuedAt ASC                                  │
+│  4. FOR EACH waiting entry:                                                          │
+│     a. IF admission.status != WAITING_LIST → delete stale entry, continue             │
+│     b. IF !isBedEligibleForAdmission(bed, admission) → continue                      │
+│     c. MATCH FOUND:                                                                  │
+│        - bed.setStatus(RESERVED)                                                     │
+│        - admission.setStatus(RESERVED)                                               │
+│        - admission.setAllocatedBed(bed)                                              │
+│        - admission.setReservationExpiresAt(now + 15 min)                             │
+│        - Delete waiting list entry                                                   │
+│        - Save BedStatusLog (AVAILABLE → RESERVED, actor=WAITING_LIST_SCHEDULER)      │
+│        - BREAK                                                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
 
 ### 1.6 Reservation Expiry Scheduler Flow
 
-@Scheduled(cron = "${allocation.reservation.cleanup-cron:0 */1 * * * *}")
-Runs every minute by default
-
-ReservationExpiryScheduler.processExpiredReservations()
-@Transactional
-1. now = Instant.now()
-2. expiredAdmissions = admissionRepository.findExpiredReservations(now)
-3. FOR EACH expired admission:
-   a. IF allocatedBed == null: set EXPIRED, save, continue
-   b. Lock bed: findByIdWithPessimisticLock(bed.getId())
-   c. IF bed.status == RESERVED:
-      - bed.setStatus(AVAILABLE)
-      - admission.setStatus(EXPIRED)
-      - admission.setAllocatedBed(null)
-      - Save BedStatusLog
-      - waitingListService.evaluateWaitingListForBed(bed)
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  @Scheduled(cron = "${allocation.reservation.cleanup-cron:0 */1 * * * *}")           │
+│  Runs every minute by default                                                        │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  ReservationExpiryScheduler.processExpiredReservations()                             │
+│  @Transactional                                                                      │
+│                                                                                      │
+│  1. now = Instant.now()                                                              │
+│  2. expiredAdmissions = admissionRepository.findExpiredReservations(now)             │
+│     → SELECT a FROM Admission a                                                      │
+│       WHERE a.status = 'RESERVED' AND a.reservationExpiresAt < :now                  │
+│                                                                                      │
+│  3. FOR EACH expired admission:                                                      │
+│     a. IF allocatedBed == null:                                                      │
+│        - admission.setStatus(EXPIRED)                                                │
+│        - admission.setCancellationReason("Reservation hold period elapsed")          │
+│        - Save, continue                                                              │
+│     b. Lock bed: findByIdWithPessimisticLock(bed.getId())                            │
+│     c. IF bed.status == RESERVED:                                                    │
+│        - bed.setStatus(AVAILABLE)                                                    │
+│        - admission.setStatus(EXPIRED)                                                │
+│        - admission.setAllocatedBed(null)                                             │
+│        - admission.setCancellationReason(...)                                        │
+│        - Save BedStatusLog (RESERVED → AVAILABLE, actor=EXPIRY_SCHEDULER)            │
+│        - waitingListService.evaluateWaitingListForBed(bed)                           │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
 
 ### 1.7 Entity Relationship Diagram
 
-Hospital ──1:N──► Ward ──1:N──► Room ──1:N──► Bed
-                                               │
-                                               │ 1:N
-                                               ▼
-                                          Admission
-                                               │
-                                               │ 1:1
-                                               ▼
-                                        WaitingListEntry
-
-Bed ──1:N──► BedStatusLog
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+│    Hospital     │       │      Ward       │       │      Room       │       │       Bed       │
+│─────────────────│       │─────────────────│       │─────────────────│       │─────────────────│
+│ id (PK)         │◄──1:N─│ id (PK)         │◄──1:N─│ id (PK)         │◄──1:N─│ id (PK)         │
+│ code (UNIQUE)   │       │ hospital_id (FK)│       │ ward_id (FK)    │       │ room_id (FK)    │
+│ name            │       │ name            │       │ room_number     │       │ bed_number      │
+│ address         │       │ ward_type       │       │ is_isolation_room│      │ bed_type        │
+│ created_at      │       │ gender_policy   │       │ created_at      │       │ status          │
+│ updated_at      │       │ created_at      │       │ updated_at      │       │ version         │
+└─────────────────┘       │ updated_at      │       └─────────────────┘       │ created_at      │
+                          └─────────────────┘                                 │ updated_at      │
+                                                                              └────────┬────────┘
+                                                                                       │
+                          ┌────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────────────┐
+│   Admission     │       │ WaitingListEntry│       │    BedStatusLog         │
+│─────────────────│       │─────────────────│       │─────────────────────────│
+│ id (PK)         │◄──1:1─│ id (PK)         │       │ id (PK)                 │
+│ patient_id      │       │ admission_id(FK)│       │ bed_id (FK)             │
+│ patient_gender  │       │ priority_score  │       │ previous_status         │
+│ required_ward_  │       │ enqueued_at     │       │ new_status              │
+│   type          │       └─────────────────┘       │ changed_by              │
+│ required_bed_   │                                  │ reason                  │
+│   type          │                                  │ logged_at               │
+│ priority        │                                  └─────────────────────────┘
+│ isolation_      │
+│   required      │
+│ status          │
+│ allocated_bed_id│──────────────────────────────────► Bed (FK)
+│ reservation_    │
+│   expires_at    │
+│ admission_time  │
+│ discharge_time  │
+│ cancellation_   │
+│   reason        │
+│ version         │
+│ created_at      │
+│ updated_at      │
+└─────────────────┘
 
 
 ---
@@ -245,6 +358,8 @@ CREATE TABLE IF NOT EXISTS wards (
     name VARCHAR(100) NOT NULL,
     ward_type VARCHAR(50) NOT NULL,
     gender_policy VARCHAR(30) NOT NULL DEFAULT 'UNISEX',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_wards_hospital FOREIGN KEY (hospital_id) REFERENCES hospitals(id) ON DELETE CASCADE,
     UNIQUE KEY uk_ward_name (hospital_id, name),
     INDEX idx_wards_type (ward_type),
@@ -257,12 +372,14 @@ CREATE TABLE IF NOT EXISTS rooms (
     ward_id BIGINT NOT NULL,
     room_number VARCHAR(50) NOT NULL,
     is_isolation_room BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_rooms_ward FOREIGN KEY (ward_id) REFERENCES wards(id) ON DELETE CASCADE,
     UNIQUE KEY uk_ward_room (ward_id, room_number),
     INDEX idx_rooms_isolation (is_isolation_room)
 ) ENGINE=InnoDB;
 
--- 4. Beds Table
+-- 4. Beds Table (with optimistic lock version and status indexing)
 CREATE TABLE IF NOT EXISTS beds (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     room_id BIGINT NOT NULL,
@@ -270,6 +387,8 @@ CREATE TABLE IF NOT EXISTS beds (
     bed_type VARCHAR(50) NOT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'AVAILABLE',
     version BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_beds_room FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
     UNIQUE KEY uk_room_bed (room_id, bed_number),
     INDEX idx_beds_status_type (status, bed_type),
@@ -292,6 +411,8 @@ CREATE TABLE IF NOT EXISTS admissions (
     discharge_time TIMESTAMP NULL,
     cancellation_reason VARCHAR(255) NULL,
     version BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_admissions_bed FOREIGN KEY (allocated_bed_id) REFERENCES beds(id) ON DELETE SET NULL,
     INDEX idx_admissions_patient (patient_id),
     INDEX idx_admissions_status (status),
@@ -323,6 +444,9 @@ CREATE TABLE IF NOT EXISTS bed_status_logs (
 
 
 ### 2.2 Seed Data
+
+-- Baseline seed data for immediate testing.
+-- Idempotent: safe to re-run.
 
 INSERT IGNORE INTO hospitals (code, name, address)
 VALUES ('HOSP-ALPHA', 'St. Jude Metropolitan', '742 Evergreen Terrace');
@@ -473,6 +597,19 @@ Create Ward Body:
   "genderPolicy": "UNISEX"
 }
 
+Response (201 Created):
+{
+  "success": true,
+  "message": "Ward created successfully",
+  "data": {
+    "id": 1,
+    "hospitalId": 1,
+    "name": "General Ward",
+    "wardType": "GENERAL",
+    "genderPolicy": "UNISEX"
+  }
+}
+
 
 ### 3.6 Room APIs
 
@@ -487,6 +624,21 @@ Create Room Body:
   "wardId": 1,
   "roomNumber": "G-101",
   "isolationRoom": false
+}
+
+Response (201 Created):
+{
+  "success": true,
+  "message": "Room created successfully",
+  "data": {
+    "id": 1,
+    "wardId": 1,
+    "wardName": "General Ward",
+    "wardType": "GENERAL",
+    "roomNumber": "G-101",
+    "isolationRoom": false,
+    "bedCount": 0
+  }
 }
 
 
@@ -508,6 +660,58 @@ Create Bed Body:
   "bedType": "STANDARD"
 }
 
+Bed Response:
+{
+  "bedId": 1,
+  "bedNumber": "G-101-B1",
+  "bedType": "STANDARD",
+  "status": "AVAILABLE",
+  "roomId": 1,
+  "roomNumber": "G-101",
+  "isolationRoom": false,
+  "wardId": 1,
+  "wardName": "General Ward",
+  "wardType": "GENERAL",
+  "hospitalId": 1
+}
+
+Availability Search Filters (all optional):
+
+| Parameter | Meaning |
+|---|---|
+| hospitalId | Restrict to a hospital |
+| wardId | Restrict to a ward |
+| bedType | Restrict to a bed type |
+| isolationRequired | Match the room's isolation flag |
+| wardType | Restrict to a ward type |
+| patientGender | Filter by the ward's gender policy |
+
+Example:
+GET /api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE
+
+Block a Bed:
+POST /api/v1/beds/12/block?reason=Equipment%20repair
+If reason is omitted, the default is Administrative hold.
+
+Complete Maintenance:
+POST /api/v1/beds/12/maintenance/complete
+The bed must be in MAINTENANCE. If a waiting-list admission is assigned
+immediately, the resulting bed status can be RESERVED rather than remaining
+AVAILABLE.
+
+Bed Statistics Response:
+{
+  "success": true,
+  "message": "Operation successful",
+  "data": {
+    "AVAILABLE": 10,
+    "RESERVED": 3,
+    "OCCUPIED": 15,
+    "MAINTENANCE": 2,
+    "BLOCKED": 1
+  }
+}
+
 
 ### 3.8 Admission APIs
 
@@ -521,6 +725,65 @@ Create Bed Body:
 | POST | /api/v1/admissions/{admissionId}/discharge | Discharge patient, bed → MAINTENANCE |
 | POST | /api/v1/admissions/{admissionId}/cancel?reason={reason} | Cancel an admission |
 
+Admission Request Body (NO bed ID):
+{
+  "patientId": "PAT-1001",
+  "patientGender": "MALE",
+  "requiredWardType": "GENERAL",
+  "requiredBedType": "STANDARD",
+  "priority": "NORMAL",
+  "isolationRequired": false
+}
+
+Response (201 Created) — Automatic Reservation:
+{
+  "success": true,
+  "message": "Admission processed",
+  "data": {
+    "admissionId": 101,
+    "patientId": "PAT-1001",
+    "patientGender": "MALE",
+    "requiredWardType": "GENERAL",
+    "requiredBedType": "STANDARD",
+    "priority": "NORMAL",
+    "isolationRequired": false,
+    "status": "RESERVED",
+    "allocatedBedId": 1,
+    "reservationExpiresAt": "2026-10-07T12:30:00Z",
+    "admissionTime": null,
+    "dischargeTime": null,
+    "cancellationReason": null
+  }
+}
+
+Response (201 Created) — Waiting List:
+{
+  "success": true,
+  "message": "Admission processed",
+  "data": {
+    "admissionId": 102,
+    "patientId": "PAT-1002",
+    "status": "WAITING_LIST",
+    "allocatedBedId": null,
+    "...": "..."
+  }
+}
+
+Manual Reservation:
+POST /api/v1/admissions/42/reserve?bedId=12
+The admission must be PENDING or WAITING_LIST, and the requested bed must be eligible.
+
+Confirm Admission:
+POST /api/v1/admissions/101/confirm
+Changes admission from RESERVED → ADMITTED, bed from RESERVED → OCCUPIED.
+
+Discharge:
+POST /api/v1/admissions/101/discharge
+Only accepted for ADMITTED admission. Bed moves to MAINTENANCE.
+
+Cancel:
+POST /api/v1/admissions/101/cancel?reason=Patient%20left
+
 
 ### 3.9 API Flow Sequence
 
@@ -530,9 +793,13 @@ Create Bed Body:
 4. POST /api/v1/beds                               → Create bed (AVAILABLE)
 5. GET  /api/v1/beds/available                     → Search available beds
 6. POST /api/v1/admissions/request                 → Automatic allocation
+   → status = RESERVED (bed found) OR WAITING_LIST (no bed)
 7. POST /api/v1/admissions/{id}/confirm            → Confirm admission
+   → Bed = OCCUPIED
 8. POST /api/v1/admissions/{id}/discharge          → Discharge patient
+   → Bed = MAINTENANCE
 9. POST /api/v1/beds/{id}/maintenance/complete     → Complete maintenance
+   → Bed = AVAILABLE (or RESERVED if waiting list assigns)
 10. GET /api/v1/admissions/{id}                    → Check waiting admission
 
 
@@ -879,18 +1146,23 @@ allocateBed(admissionA)           allocateBed(admissionB)
   │                                 │
   ├─ findEligibleCandidateBedIds    ├─ findEligibleCandidateBedIds
   │  → [1]                          │  → [1]
+  │                                 │
   ├─ findByIdWithPessimisticLock(1) │
   │  → LOCK ACQUIRED                │
   │                                 ├─ findByIdWithPessimisticLock(1)
   │                                 │  → LOCK TIMEOUT (0 ms)
+  │                                 │  → ConcurrencyFailureException
   │                                 │  → skip candidate
   │                                 │  → return Optional.empty()
+  │                                 │
   ├─ isBedEligibleForAdmission      │
   │  → true                         │
+  │                                 │
   ├─ bed.setStatus(RESERVED)        │
   ├─ admission.setStatus(RESERVED)  │
   ├─ save + commit                  │
   │  → LOCK RELEASED                │
+  │                                 │
   │                                 ├─ enqueue(admissionB)
   │                                 │  → WAITING_LIST
 
@@ -900,14 +1172,22 @@ allocateBed(admissionA)           allocateBed(admissionB)
 Operator A                        Operator B
 ──────────                        ──────────
 reserveBedManually(42, 12)        reserveBedManually(43, 12)
-  ├─ lockAdmission(42)              ├─ lockAdmission(43)
-  │  → LOCK ACQUIRED                │  → LOCK ACQUIRED (different admission)
+  │                                 │
+  ├─ lockAdmission(42)              │
+  │  → LOCK ACQUIRED                │
+  │                                 ├─ lockAdmission(43)
+  │                                 │  → LOCK ACQUIRED (different admission)
+  │                                 │
   ├─ findByIdWithPessimisticLock(12)│
-  │  → LOCK ACQUIRED                ├─ findByIdWithPessimisticLock(12)
+  │  → LOCK ACQUIRED                │
+  │                                 ├─ findByIdWithPessimisticLock(12)
   │                                 │  → LOCK TIMEOUT
   │                                 │  → BedAllocationConflictException
-  ├─ isBedAlreadyHeld(bed) → false  │
-  ├─ isBedEligibleForAdmission → true
+  │                                 │
+  ├─ isBedAlreadyHeld(bed)          │
+  │  → false                        │
+  ├─ isBedEligibleForAdmission      │
+  │  → true                         │
   ├─ bed.setStatus(RESERVED)        │
   ├─ admission.setStatus(RESERVED)  │
   ├─ save + commit                  │
@@ -925,10 +1205,12 @@ spring:
       minimum-idle: 5
       idle-timeout: 300000
       connection-timeout: 20000
+
   jpa:
     hibernate:
       ddl-auto: validate
     open-in-view: false
+
   task:
     scheduling:
       pool:
@@ -967,14 +1249,27 @@ Test Cases:
 
 | # | Test Name | Rule Tested | Expected |
 |---|---|---|---|
-| 1 | shouldRejectWhenGenderMismatchesWardPolicy | Rule 5 | Male patient rejected from FEMALE_ONLY ward |
-| 2 | shouldRejectNonIsolationPatientFromIsolationRoom | Rule 6 | Non-isolation patient rejected |
-| 3 | shouldApproveIsolationPatientInAvailableIsolationRoom | Rule 6 | Approved for clean isolation room |
-| 4 | shouldRejectIsolationPatientWhenRoomOccupied | Rule 6 | Rejected when room occupied |
-| 5 | shouldRejectCoedInMultiBedRoom | Rule 7 | Rejected when male in same room |
-| 6 | shouldApproveSameGenderCoPlacement | Rule 7 | Same-gender co-placement approved |
-| 7 | shouldRejectNonAvailableBed | Rule 1 | MAINTENANCE bed rejected |
-| 8 | shouldRejectMismatchedWardOrBedType | Rules 3 & 4 | Mismatch rejected |
+| 1 | shouldRejectWhenGenderMismatchesWardPolicy | Rule 5 (Gender Policy) | Male patient rejected from FEMALE_ONLY ward |
+| 2 | shouldRejectNonIsolationPatientFromIsolationRoom | Rule 6 (Isolation) | Non-isolation patient rejected from isolation room |
+| 3 | shouldApproveIsolationPatientInAvailableIsolationRoom | Rule 6 (Isolation) | Isolation patient approved for clean isolation room |
+| 4 | shouldRejectIsolationPatientWhenRoomOccupied | Rule 6 (Isolation) | Isolation patient rejected when room already occupied |
+| 5 | shouldRejectCoedInMultiBedRoom | Rule 7 (Room Gender) | Female applicant rejected when male patient in same room |
+| 6 | shouldApproveSameGenderCoPlacement | Rule 7 (Room Gender) | Same-gender co-placement approved |
+| 7 | shouldRejectNonAvailableBed | Rule 1 (Status) | MAINTENANCE bed rejected |
+| 8 | shouldRejectMismatchedWardOrBedType | Rules 3 & 4 (Type Match) | Ward/bed type mismatch rejected |
+
+Sample Test Code:
+
+@Test
+@DisplayName("Should reject allocation when ward gender policy mismatches patient gender")
+void shouldRejectWhenGenderMismatchesWardPolicy() {
+    Bed femaleBed = new Bed(multiBedRoom, "F-1", BedType.STANDARD);
+    Admission maleAdmission = new Admission("P-999", PatientGender.MALE, WardType.MATERNITY,
+            BedType.STANDARD, AdmissionPriority.NORMAL, false);
+
+    boolean eligible = allocationEngine.isBedEligibleForAdmission(femaleBed, maleAdmission);
+    assertFalse(eligible, "Male patient must not be admitted into FEMALE_ONLY ward");
+}
 
 
 ### 8.2 Unit Test Coverage Summary
@@ -1007,7 +1302,59 @@ Test Cases:
 
 ### 9.2 BedAllocationConcurrencyTest
 
-Purpose: Proves the double-allocation race is closed.
+Purpose: Proves the double-allocation race is closed — N concurrent admission
+requests for M physical beds must yield exactly M reservations.
+
+@Test
+@DisplayName("Race Condition Test: 10 concurrent requests for 1 available bed. "
+        + "Exactly 1 must reserve, 9 must enqueue to Waiting List.")
+void testConcurrentBedAllocationRaceCondition() throws InterruptedException {
+    int threadCount = 10;
+    ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+    CountDownLatch startLatch = new CountDownLatch(1);
+    CountDownLatch finishLatch = new CountDownLatch(threadCount);
+
+    List<AdmissionResponse> responses = Collections.synchronizedList(new ArrayList<>());
+
+    for (int i = 0; i < threadCount; i++) {
+        final String patientId = "PATIENT-CONCURRENT-" + i;
+        executorService.submit(() -> {
+            try {
+                startLatch.await();
+                AdmissionCreationRequest request = new AdmissionCreationRequest(
+                        patientId, PatientGender.MALE, WardType.ICU,
+                        BedType.ICU, AdmissionPriority.URGENT, false
+                );
+                responses.add(admissionService.createAdmissionRequest(request));
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                finishLatch.countDown();
+            }
+        });
+    }
+
+    startLatch.countDown();
+    assertTrue(finishLatch.await(60, TimeUnit.SECONDS));
+    executorService.shutdown();
+
+    assertEquals(threadCount, responses.size());
+
+    long reservedCount = responses.stream()
+            .filter(r -> r.status() == AdmissionStatus.RESERVED).count();
+    long waitingCount = responses.stream()
+            .filter(r -> r.status() == AdmissionStatus.WAITING_LIST).count();
+
+    assertEquals(1, reservedCount, "Exactly 1 admission should acquire the RESERVED bed");
+    assertEquals(9, waitingCount, "The other 9 admissions must be queued without collision");
+
+    List<Bed> beds = bedRepository.findAll();
+    assertEquals(1, beds.size());
+    assertEquals(BedStatus.RESERVED, beds.get(0).getStatus());
+
+    assertEquals(1, admissionRepository.findByStatusOrderByIdAsc(AdmissionStatus.RESERVED).size());
+    assertEquals(9, waitingListRepository.count());
+}
 
 Expected Results:
 - 1 admission RESERVED
@@ -1019,6 +1366,62 @@ Expected Results:
 
 ### 9.3 ConcurrentManualReservationTest
 
+Purpose: Races two operators manually reserving the SAME bed for two
+different waiting admissions.
+
+@Test
+@DisplayName("Concurrent reservation requests for the same bed: exactly one wins, "
+        + "the loser gets a conflict (never a double booking)")
+void twoOperatorsCannotReserveSameBed() throws InterruptedException {
+    bed.setStatus(BedStatus.MAINTENANCE);
+    bedRepository.saveAndFlush(bed);
+
+    AdmissionResponse a = admissionService.createAdmissionRequest(
+            new AdmissionCreationRequest("PAT-MR-A", PatientGender.MALE, WardType.GENERAL,
+                    BedType.STANDARD, AdmissionPriority.NORMAL, false));
+    AdmissionResponse b = admissionService.createAdmissionRequest(
+            new AdmissionCreationRequest("PAT-MR-B", PatientGender.MALE, WardType.GENERAL,
+                    BedType.STANDARD, AdmissionPriority.URGENT, false));
+
+    assertEquals(AdmissionStatus.WAITING_LIST, a.status());
+    assertEquals(AdmissionStatus.WAITING_LIST, b.status());
+
+    bed.setStatus(BedStatus.AVAILABLE);
+    bedRepository.saveAndFlush(bed);
+
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    CountDownLatch start = new CountDownLatch(1);
+    CountDownLatch done = new CountDownLatch(2);
+    CountDownLatch success = new CountDownLatch(1);
+
+    List<String> failures = Collections.synchronizedList(new ArrayList<>());
+
+    for (AdmissionResponse target : List.of(a, b)) {
+        pool.submit(() -> {
+            try {
+                start.await();
+                admissionService.reserveBedManually(target.admissionId(), bed.getId());
+                success.countDown();
+            } catch (Exception ex) {
+                failures.add(ex.getClass().getSimpleName() + ": " + ex.getMessage());
+            } finally {
+                done.countDown();
+            }
+        });
+    }
+
+    start.countDown();
+    assertTrue(done.await(60, TimeUnit.SECONDS));
+    pool.shutdown();
+
+    assertEquals(0, success.getCount(), "Exactly one thread must win");
+    assertEquals(1, failures.size(), "Exactly one thread must fail");
+
+    assertEquals(1, admissionRepository.findByStatusOrderByIdAsc(AdmissionStatus.RESERVED).size());
+    assertEquals(BedStatus.RESERVED, bedRepository.findById(bed.getId()).orElseThrow().getStatus());
+    assertEquals(1, waitingListRepository.count());
+}
+
 Expected Results:
 - 1 manual reservation succeeds
 - 1 manual reservation fails with conflict
@@ -1029,17 +1432,49 @@ Expected Results:
 
 ### 9.4 ReservationExpiryIntegrationTest
 
+Purpose: Covers the reservation-expiry path driven by the scheduled sweep.
+
 | # | Test Name | Scenario | Expected |
 |---|---|---|---|
 | 1 | expiredReservationIsReclaimed | Backdate expiry, run scheduler | Admission EXPIRED, bed AVAILABLE |
-| 2 | expiryIsAudited | Backdate expiry | Audit log actor = EXPIRY_SCHEDULER |
-| 3 | liveReservationIsLeftAlone | Don't backdate | Still RESERVED |
-| 4 | admittedPatientIsNotExpired | Confirm then sweep | Still ADMITTED |
-| 5 | expiredBedIsHandedToWaitingPatient | A expires, B waiting | B gets bed RESERVED |
-| 6 | sweepWithNoExpiredReservationsIsNoop | None | No changes |
+| 2 | expiryIsAudited | Backdate expiry, run scheduler | Audit log has actor EXPIRY_SCHEDULER |
+| 3 | liveReservationIsLeftAlone | Don't backdate, run scheduler | Admission still RESERVED |
+| 4 | admittedPatientIsNotExpired | Confirm admission, run scheduler | Admission still ADMITTED |
+| 5 | expiredBedIsHandedToWaitingPatient | Patient A reserved, Patient B waiting, A expires | B gets bed RESERVED |
+| 6 | sweepWithNoExpiredReservationsIsNoop | No expired reservations | No changes |
+
+Sample:
+
+@Test
+@DisplayName("Expired bed is immediately re-offered to the waiting list")
+void expiredBedIsHandedToWaitingPatient() {
+    AdmissionResponse first = admissionService.createAdmissionRequest(
+            new AdmissionCreationRequest("PAT-EXP-A", PatientGender.MALE, WardType.GENERAL,
+                    BedType.STANDARD, AdmissionPriority.NORMAL, false));
+    assertEquals(AdmissionStatus.RESERVED, first.status());
+
+    AdmissionResponse second = admissionService.createAdmissionRequest(
+            new AdmissionCreationRequest("PAT-EXP-B", PatientGender.MALE, WardType.GENERAL,
+                    BedType.STANDARD, AdmissionPriority.EMERGENCY, false));
+    assertEquals(AdmissionStatus.WAITING_LIST, second.status());
+
+    backdateReservation(first.admissionId());
+    scheduler.processExpiredReservations();
+
+    assertEquals(AdmissionStatus.EXPIRED,
+            admissionRepository.findById(first.admissionId()).orElseThrow().getStatus());
+
+    AdmissionResponse served = admissionService.getAdmissionById(second.admissionId());
+    assertEquals(AdmissionStatus.RESERVED, served.status(),
+            "The waiting EMERGENCY patient must inherit the reclaimed bed");
+    assertEquals(bed.getId(), served.allocatedBedId());
+    assertEquals(0, waitingListRepository.count());
+}
 
 
 ### 9.5 BedAvailabilitySearchTest
+
+Purpose: Tests the availability search with all filter combinations.
 
 | # | Test Name | Filters | Expected |
 |---|---|---|---|
@@ -1048,29 +1483,33 @@ Expected Results:
 | 3 | filterByBedType | STANDARD | 1 bed |
 | 4 | filterByHospital | hospitalA | 4 beds |
 | 5 | filterByIsolation | isolation=true | 2 beds |
-| 6 | genderFilterExcludesFemaleOnlyWard | MALE | 3 beds |
+| 6 | genderFilterExcludesFemaleOnlyWard | MALE | 3 beds (no maternity) |
 | 7 | genderFilterIncludesFemaleOnlyWard | FEMALE | 4 beds |
 | 8 | otherGenderOnlySeesUnisexWards | OTHER | 3 beds |
 | 9 | combinedFilters | ICU + ICU + isolation + MALE | 2 beds |
 | 10 | contradictoryFiltersReturnEmpty | Multiple contradictions | 0 beds |
 | 11 | isolationAndGenderCombined | isolation + ICU + MALE | 2 beds |
-| 12 | onlyAvailableBedsReturned | One MAINTENANCE | 3 beds |
+| 12 | onlyAvailableBedsReturned | Set one to MAINTENANCE | 3 beds |
 
 
 ### 9.6 AdmissionLifecycleIntegrationTest
 
+Purpose: End-to-end lifecycle coverage on H2.
+
 | # | Test Name | Scenario |
 |---|---|---|
 | 1 | fullLifecycle | REQUEST → RESERVED → ADMITTED → DISCHARGED → AVAILABLE |
-| 2 | waitingListIsServedOnMaintenanceCompletion | Second admission gets bed after maintenance |
-| 3 | dischargeFromWrongStateIsRejected | Discharge from RESERVED throws |
-| 4 | cancelReleasesBed | Cancel releases bed |
-| 5 | manualReservationRejectsIneligibleBed | Wrong bed type throws |
+| 2 | waitingListIsServedOnMaintenanceCompletion | Second admission waits, gets bed after maintenance |
+| 3 | dischargeFromWrongStateIsRejected | Discharge from RESERVED throws exception |
+| 4 | cancelReleasesBed | Cancel releases bed for next patient |
+| 5 | manualReservationRejectsIneligibleBed | Manual reserve of wrong bed type throws |
 | 6 | auditTrailIsWritten | All 4 bed states appear in logs |
-| 7 | isolationPolicyIsEnforcedEndToEnd | Isolation enforced |
+| 7 | isolationPolicyIsEnforcedEndToEnd | Isolation patient gets isolation room; non-isolation doesn't |
 
 
 ### 9.7 HospitalRoomManagementTest
+
+Purpose: Tests hospital, ward, room, and bed management APIs.
 
 | # | Test Name | Purpose |
 |---|---|---|
@@ -1092,7 +1531,7 @@ src/test/resources/application-test.yml:
 
 spring:
   datasource:
-    url: jdbc:h2:mem:hospital_test_db;DB_CLOSE_DELAY=-1;MODE=MySQL
+    url: jdbc:h2:mem:hospital_test_db;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL
     driver-class-name: org.h2.Driver
     username: sa
     password: ""
@@ -1101,6 +1540,9 @@ spring:
       ddl-auto: create-drop
     show-sql: false
     open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
   task:
     scheduling:
       pool:
@@ -1141,10 +1583,10 @@ Expected: 47 tests across 8 classes, all passing.
 | Tag | Controller | Description |
 |---|---|---|
 | Hospital Management | HospitalController | Root of the inventory hierarchy |
-| Ward Management | WardController | Managing hospital wards |
-| Room Management | RoomController | Rooms within a ward |
-| Bed Management | BedController | Beds inventory, maintenance, search |
-| Admission & Allocation Engine | AdmissionController | Admission orchestration |
+| Ward Management | WardController | Endpoints for managing hospital wards and inventory |
+| Room Management | RoomController | Rooms within a ward, including isolation rooms |
+| Bed Management | BedController | Endpoints for beds inventory, maintenance, and search |
+| Admission & Allocation Engine | AdmissionController | Admission orchestration, reservation, confirmation, and discharge |
 
 
 ### 10.3 Annotated Endpoints
@@ -1155,8 +1597,22 @@ Example from BedController:
 
 @PostMapping
 @Operation(summary = "Add a new bed to a room")
-public ResponseEntity<ApiResponse<BedResponse>> createBed(
-        @Valid @RequestBody CreateBedRequest request) { ... }
+public ResponseEntity<ApiResponse<BedResponse>> createBed(@Valid @RequestBody CreateBedRequest request) {
+    // ...
+}
+
+@GetMapping("/available")
+@Operation(summary = "Search available beds. Every filter is optional; "
+        + "patientGender matches the ward's gender policy.")
+public ResponseEntity<ApiResponse<List<BedResponse>>> searchAvailableBeds(
+        @RequestParam(required = false) Long hospitalId,
+        @RequestParam(required = false) Long wardId,
+        @RequestParam(required = false) BedType bedType,
+        @RequestParam(required = false) Boolean isolationRequired,
+        @RequestParam(required = false) WardType wardType,
+        @RequestParam(required = false) PatientGender patientGender) {
+    // ...
+}
 
 
 ### 10.4 OpenAPI Configuration
@@ -1178,7 +1634,7 @@ springdoc:
 
 1. Start the application: mvn spring-boot:run
 2. Open http://localhost:8080/swagger-ui.html
-3. Expand any endpoint group
+3. Expand any endpoint group (e.g., "Bed Management")
 4. Click "Try it out" to execute requests
 5. View request/response schemas and example values
 
@@ -1237,6 +1693,8 @@ Hospital Bed Allocation Engine
 
 Create Hospital:
 POST {{base_url}}/api/v1/hospitals
+Content-Type: application/json
+
 {
   "code": "HOSP-01",
   "name": "City General Hospital",
@@ -1245,6 +1703,8 @@ POST {{base_url}}/api/v1/hospitals
 
 Create Ward:
 POST {{base_url}}/api/v1/wards
+Content-Type: application/json
+
 {
   "hospitalId": {{hospital_id}},
   "name": "General Ward",
@@ -1254,6 +1714,8 @@ POST {{base_url}}/api/v1/wards
 
 Create Room:
 POST {{base_url}}/api/v1/rooms
+Content-Type: application/json
+
 {
   "wardId": {{ward_id}},
   "roomNumber": "G-101",
@@ -1262,6 +1724,8 @@ POST {{base_url}}/api/v1/rooms
 
 Create Bed:
 POST {{base_url}}/api/v1/beds
+Content-Type: application/json
+
 {
   "roomId": {{room_id}},
   "bedNumber": "G-101-B1",
@@ -1273,6 +1737,8 @@ GET {{base_url}}/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&is
 
 Request Admission (Automatic):
 POST {{base_url}}/api/v1/admissions/request
+Content-Type: application/json
+
 {
   "patientId": "PAT-1001",
   "patientGender": "MALE",
@@ -1297,12 +1763,14 @@ POST {{base_url}}/api/v1/admissions/{{admission_id}}/cancel?reason=Patient%20lef
 
 ### 11.4 Postman Test Scripts
 
-Test: Admission Created Successfully:
+Test: Admission Created Successfully
+
 pm.test("Admission processed", function () {
     pm.response.to.have.status(201);
     var jsonData = pm.response.json();
     pm.expect(jsonData.success).to.be.true;
     pm.expect(jsonData.data.status).to.be.oneOf(["RESERVED", "WAITING_LIST"]);
+    
     if (jsonData.data.status === "RESERVED") {
         pm.expect(jsonData.data.allocatedBedId).to.not.be.null;
         pm.environment.set("admission_id", jsonData.data.admissionId);
@@ -1311,7 +1779,8 @@ pm.test("Admission processed", function () {
     }
 });
 
-Test: Bed Status After Confirm:
+Test: Bed Status After Confirm
+
 pm.test("Bed is OCCUPIED", function () {
     pm.response.to.have.status(200);
     var jsonData = pm.response.json();
@@ -1326,74 +1795,340 @@ pm.test("Bed is OCCUPIED", function () {
 ### 12.1 End-to-End Demonstration Script
 
 Step 1: Start the Application
+
+# Prerequisites: MySQL 8 running, database created
 mysql -u root -p < schema.sql
 mvn spring-boot:run
 
 Step 2: Create a Hospital
+
 curl -i -X POST "http://localhost:8080/api/v1/hospitals" \
   -H "Content-Type: application/json" \
-  -d '{"code": "HOSP-01", "name": "City General Hospital", "address": "1 Main Street, Tirupati"}'
+  -d '{
+    "code": "HOSP-01",
+    "name": "City General Hospital",
+    "address": "1 Main Street, Tirupati"
+  }'
+
+Response (201 Created):
+{
+  "success": true,
+  "message": "Hospital created successfully",
+  "data": {
+    "id": 1,
+    "code": "HOSP-01",
+    "name": "City General Hospital",
+    "address": "1 Main Street, Tirupati"
+  }
+}
 
 Step 3: Create a Ward
+
 curl -i -X POST "http://localhost:8080/api/v1/wards" \
   -H "Content-Type: application/json" \
-  -d '{"hospitalId": 1, "name": "General Ward", "wardType": "GENERAL", "genderPolicy": "UNISEX"}'
+  -d '{
+    "hospitalId": 1,
+    "name": "General Ward",
+    "wardType": "GENERAL",
+    "genderPolicy": "UNISEX"
+  }'
+
+Response (201 Created):
+{
+  "success": true,
+  "message": "Ward created successfully",
+  "data": {
+    "id": 1,
+    "hospitalId": 1,
+    "name": "General Ward",
+    "wardType": "GENERAL",
+    "genderPolicy": "UNISEX"
+  }
+}
 
 Step 4: Create a Room
+
 curl -i -X POST "http://localhost:8080/api/v1/rooms" \
   -H "Content-Type: application/json" \
-  -d '{"wardId": 1, "roomNumber": "G-101", "isolationRoom": false}'
+  -d '{
+    "wardId": 1,
+    "roomNumber": "G-101",
+    "isolationRoom": false
+  }'
+
+Response (201 Created):
+{
+  "success": true,
+  "message": "Room created successfully",
+  "data": {
+    "id": 1,
+    "wardId": 1,
+    "wardName": "General Ward",
+    "wardType": "GENERAL",
+    "roomNumber": "G-101",
+    "isolationRoom": false,
+    "bedCount": 0
+  }
+}
 
 Step 5: Create a Bed
+
 curl -i -X POST "http://localhost:8080/api/v1/beds" \
   -H "Content-Type: application/json" \
-  -d '{"roomId": 1, "bedNumber": "G-101-B1", "bedType": "STANDARD"}'
+  -d '{
+    "roomId": 1,
+    "bedNumber": "G-101-B1",
+    "bedType": "STANDARD"
+  }'
+
+Response (201 Created):
+{
+  "success": true,
+  "message": "Bed created successfully",
+  "data": {
+    "bedId": 1,
+    "bedNumber": "G-101-B1",
+    "bedType": "STANDARD",
+    "status": "AVAILABLE",
+    "roomId": 1,
+    "roomNumber": "G-101",
+    "isolationRoom": false,
+    "wardId": 1,
+    "wardName": "General Ward",
+    "wardType": "GENERAL",
+    "hospitalId": 1
+  }
+}
 
 Step 6: Search Available Beds
+
 curl -i "http://localhost:8080/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE"
 
+Response (200 OK):
+{
+  "success": true,
+  "message": "Operation successful",
+  "data": [
+    {
+      "bedId": 1,
+      "bedNumber": "G-101-B1",
+      "bedType": "STANDARD",
+      "status": "AVAILABLE",
+      "roomId": 1,
+      "roomNumber": "G-101",
+      "isolationRoom": false,
+      "wardId": 1,
+      "wardName": "General Ward",
+      "wardType": "GENERAL",
+      "hospitalId": 1
+    }
+  ]
+}
+
 Step 7: Request Admission (Automatic Allocation)
+
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
-  -d '{"patientId": "PAT-1001", "patientGender": "MALE", "requiredWardType": "GENERAL",
-       "requiredBedType": "STANDARD", "priority": "NORMAL", "isolationRequired": false}'
-→ Response: status = RESERVED, allocatedBedId = 1
+  -d '{
+    "patientId": "PAT-1001",
+    "patientGender": "MALE",
+    "requiredWardType": "GENERAL",
+    "requiredBedType": "STANDARD",
+    "priority": "NORMAL",
+    "isolationRequired": false
+  }'
+
+Response (201 Created) — Bed Found:
+{
+  "success": true,
+  "message": "Admission processed",
+  "data": {
+    "admissionId": 101,
+    "patientId": "PAT-1001",
+    "patientGender": "MALE",
+    "requiredWardType": "GENERAL",
+    "requiredBedType": "STANDARD",
+    "priority": "NORMAL",
+    "isolationRequired": false,
+    "status": "RESERVED",
+    "allocatedBedId": 1,
+    "reservationExpiresAt": "2026-10-07T12:30:00Z",
+    "admissionTime": null,
+    "dischargeTime": null,
+    "cancellationReason": null
+  }
+}
+
+Key Observation: The request did NOT include a bedId. The backend automatically
+selected bed ID 1 and returned status: "RESERVED" with allocatedBedId: 1.
 
 Step 8: Submit Second Admission (Same Requirements)
+
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
-  -d '{"patientId": "PAT-1002", "patientGender": "MALE", "requiredWardType": "GENERAL",
-       "requiredBedType": "STANDARD", "priority": "URGENT", "isolationRequired": false}'
-→ Response: status = WAITING_LIST, allocatedBedId = null
+  -d '{
+    "patientId": "PAT-1002",
+    "patientGender": "MALE",
+    "requiredWardType": "GENERAL",
+    "requiredBedType": "STANDARD",
+    "priority": "URGENT",
+    "isolationRequired": false
+  }'
+
+Response (201 Created) — No Bed Available:
+{
+  "success": true,
+  "message": "Admission processed",
+  "data": {
+    "admissionId": 102,
+    "patientId": "PAT-1002",
+    "patientGender": "MALE",
+    "requiredWardType": "GENERAL",
+    "requiredBedType": "STANDARD",
+    "priority": "URGENT",
+    "isolationRequired": false,
+    "status": "WAITING_LIST",
+    "allocatedBedId": null,
+    "reservationExpiresAt": null,
+    "admissionTime": null,
+    "dischargeTime": null,
+    "cancellationReason": null
+  }
+}
+
+Key Observation: The only bed is RESERVED for PAT-1001, so PAT-1002 is
+automatically placed on the WAITING_LIST with priority URGENT (score 200).
 
 Step 9: Confirm First Admission
+
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/confirm"
-→ Admission = ADMITTED, Bed = OCCUPIED
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Admission confirmed. Bed is now OCCUPIED",
+  "data": {
+    "admissionId": 101,
+    "status": "ADMITTED",
+    "allocatedBedId": 1,
+    "admissionTime": "2026-10-07T12:05:00Z",
+    "reservationExpiresAt": null,
+    "...": "..."
+  }
+}
+
+Bed Status Check:
+curl -i "http://localhost:8080/api/v1/beds/1"
+{
+  "success": true,
+  "message": "Operation successful",
+  "data": { "bedId": 1, "status": "OCCUPIED", "...": "..." }
+}
 
 Step 10: Discharge First Admission
+
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/discharge"
-→ Admission = DISCHARGED, Bed = MAINTENANCE
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Patient discharged. Bed queued for MAINTENANCE",
+  "data": {
+    "admissionId": 101,
+    "status": "DISCHARGED",
+    "dischargeTime": "2026-10-07T12:10:00Z",
+    "...": "..."
+  }
+}
+
+Bed Status Check:
+{
+  "data": { "bedId": 1, "status": "MAINTENANCE", "...": "..." }
+}
 
 Step 11: Complete Maintenance
+
 curl -i -X POST "http://localhost:8080/api/v1/beds/1/maintenance/complete"
-→ Bed status = RESERVED (auto-assigned to PAT-1002)
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Bed maintenance completed. Bed is now AVAILABLE",
+  "data": { "bedId": 1, "status": "RESERVED", "...": "..." }
+}
+
+Key Observation: The bed status is RESERVED (not AVAILABLE) because the waiting
+list evaluator immediately assigned the bed to PAT-1002 (URGENT priority).
 
 Step 12: Verify Waiting Patient Now Has the Bed
+
 curl -i "http://localhost:8080/api/v1/admissions/102"
-→ status = RESERVED, allocatedBedId = 1
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Operation successful",
+  "data": {
+    "admissionId": 102,
+    "patientId": "PAT-1002",
+    "status": "RESERVED",
+    "allocatedBedId": 1,
+    "reservationExpiresAt": "2026-10-07T12:25:00Z",
+    "...": "..."
+  }
+}
+
+Key Observation: PAT-1002 has been automatically promoted from WAITING_LIST to
+RESERVED and now holds bed ID 1. The waiting list entry has been removed.
 
 Step 13: Check Bed Statistics
+
 curl -i "http://localhost:8080/api/v1/beds/stats"
-→ { "AVAILABLE": 0, "RESERVED": 1, "OCCUPIED": 0, "MAINTENANCE": 0, "BLOCKED": 0 }
+
+Response (200 OK):
+{
+  "success": true,
+  "message": "Operation successful",
+  "data": {
+    "AVAILABLE": 0,
+    "RESERVED": 1,
+    "OCCUPIED": 0,
+    "MAINTENANCE": 0,
+    "BLOCKED": 0
+  }
+}
 
 Step 14: Verify Audit Trail
+
 mysql -u root -p hospital_allocation_db -e "
   SELECT previous_status, new_status, changed_by, reason, logged_at
-  FROM bed_status_logs WHERE bed_id = 1 ORDER BY logged_at ASC;"
+  FROM bed_status_logs
+  WHERE bed_id = 1
+  ORDER BY logged_at ASC;
+"
+
+Output:
++-----------------+------------+----------------------+-------------------------------------+---------------------+
+| previous_status | new_status | changed_by           | reason                              | logged_at           |
++-----------------+------------+----------------------+-------------------------------------+---------------------+
+| AVAILABLE       | AVAILABLE  | INITIAL_PROVISIONING | Bed created                         | 2026-10-07 12:00:00 |
+| AVAILABLE       | RESERVED   | ALLOCATION_ENGINE    | Admission: 101                      | 2026-10-07 12:01:00 |
+| RESERVED        | OCCUPIED   | ADMISSION_CONFIRM    | Patient admitted: PAT-1001          | 2026-10-07 12:05:00 |
+| OCCUPIED        | MAINTENANCE| DISCHARGE_WORKFLOW   | Admission: 101                      | 2026-10-07 12:10:00 |
+| MAINTENANCE     | AVAILABLE  | MAINTENANCE_SUPERVISOR| Sanitization complete              | 2026-10-07 12:15:00 |
+| AVAILABLE       | RESERVED   | WAITING_LIST_SCHEDULER| Allocated from waiting list to admission ID: 102 | 2026-10-07 12:15:00 |
++-----------------+------------+----------------------+-------------------------------------+---------------------+
 
 Step 15: Run Concurrency Test
+
 mvn -Dtest=BedAllocationConcurrencyTest test
-→ 10 concurrent requests for 1 bed → 1 RESERVED, 9 WAITING_LIST
+
+Expected Output:
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+
+This proves that 10 concurrent requests for 1 bed result in exactly 1
+reservation and 9 waiting list entries — no double-booking.
 
 
 ### 12.2 Demonstration Summary
@@ -1416,13 +2151,13 @@ mvn -Dtest=BedAllocationConcurrencyTest test
 
 ### 12.3 Key Demonstrations
 
-- No bed ID in admission request: engine selects the bed.
-- Automatic waiting list: queued by priority when no bed available.
+- No bed ID in admission request: The client sends only patient requirements; the engine selects the bed.
+- Automatic waiting list: When no bed is available, the admission is queued by priority.
 - Priority ordering: EMERGENCY (300) > URGENT (200) > NORMAL (100); FIFO within same priority.
-- Maintenance workflow: Discharge → MAINTENANCE → AVAILABLE (or auto-reserved).
-- Concurrency safety: Pessimistic locking prevents double-allocation.
+- Maintenance workflow: Discharge → MAINTENANCE → AVAILABLE (or auto-reserved for waiting patient).
+- Concurrency safety: Pessimistic locking prevents double-allocation under race conditions.
 - Audit trail: Every bed status transition is logged with actor and reason.
-- Automatic waiting list evaluation: Highest-priority waiting patient gets released bed immediately.
+- Automatic waiting list evaluation: When a bed is released, the highest-priority waiting patient gets it immediately.
 
 
 ### 12.4 Swagger UI Walkthrough
@@ -1434,8 +2169,10 @@ mvn -Dtest=BedAllocationConcurrencyTest test
 5. Expand Admission & Allocation Engine → POST /api/v1/admissions/request
 6. Submit admission without bed ID → observe automatic allocation
 7. Submit second admission → observe WAITING_LIST status
-8. Confirm admission → discharge → complete maintenance
-9. Check the waiting admission now has the bed
+8. Use POST /api/v1/admissions/{admissionId}/confirm to confirm
+9. Use POST /api/v1/admissions/{admissionId}/discharge to discharge
+10. Use POST /api/v1/beds/{bedId}/maintenance/complete to release bed
+11. Check the waiting admission now has the bed
 
 
 ---
@@ -1452,18 +2189,27 @@ server:
 spring:
   application:
     name: hospital-bed-allocation-engine
+
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:hospital_allocation_db}
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:hospital_allocation_db}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
     username: ${DB_USER:root}
     password: ${DB_PASSWORD:2004}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+
   jpa:
     hibernate:
       ddl-auto: validate
+    show-sql: false
     open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
   task:
     scheduling:
       pool:
@@ -1476,7 +2222,7 @@ springdoc:
 allocation:
   reservation:
     timeout-minutes: 15
-    cleanup-cron: "0 */1 * * * *"
+    cleanup-cron: "0 */1 * * * *"   # every minute
 
 
 ### A.2 Environment Variables
@@ -1492,8 +2238,8 @@ allocation:
 
 ### A.3 Security Note
 
-Use environment variables or a secrets manager for real deployments;
-do not rely on the development default password.
+The supplied YAML contains a default database password. Use environment variables
+or a secrets manager for real deployments; do not rely on the development default.
 
 
 ---
@@ -1502,18 +2248,18 @@ do not rely on the development default password.
 
 | # | Note | Impact | Recommendation |
 |---|---|---|---|
-| 1 | Patient identity not verified | patientId is just a string | Add patient service |
-| 2 | Admission requests do not specify a hospital | Allocation can select from any hospital | Add hospitalId to DTO |
-| 3 | Room-level rules not protected by room lock | Concurrent isolation/gender checks could both pass | Add room-level lock |
-| 4 | Cancellation can bypass discharge-cleaning | OCCUPIED → AVAILABLE directly | Restrict cancellation |
-| 5 | Blocking a reserved bed leaves active reservation | Admission remains RESERVED on BLOCKED bed | Add validation |
-| 6 | BedStatusTransition enum not sole enforcement point | Service methods set statuses directly | Centralize |
-| 7 | Waiting-list priority applied only during evaluation | New admission doesn't check older entries first | Add pre-check |
-| 8 | Not all coordination rows are locked | Expiry scheduler doesn't lock admission rows | Add pessimistic lock |
-| 9 | Availability search is informational | Doesn't guarantee reservation | Document clearly |
-| 10 | Concurrency tests use H2 | Not MySQL | Test with Testcontainers |
-| 11 | No authentication/authorization | Endpoints are public | Add Spring Security |
-| 12 | No blocked-bed release endpoint | No API for BLOCKED → AVAILABLE | Add unblock endpoint |
+| 1 | Patient identity is not verified | patientId is just a string; no patient table | Add patient service/lookup for production |
+| 2 | Admission requests do not specify a hospital | Allocation can select a bed from any hospital | Add hospitalId to request DTO if needed |
+| 3 | Room-level rules not protected by room lock | Concurrent requests for different beds in same room could both pass isolation/gender checks | Add room-level lock or DB constraint |
+| 4 | Cancellation can bypass discharge-cleaning | OCCUPIED bed can go directly to AVAILABLE | Restrict cancellation to pre-admission states |
+| 5 | Blocking a reserved bed leaves active reservation | Admission can remain RESERVED on BLOCKED bed | Add validation or release reservation on block |
+| 6 | BedStatusTransition enum not the single enforcement point | Service methods set statuses directly | Centralize transition validation |
+| 7 | Waiting-list priority applied during evaluation only | New admission doesn't check older waiting entries first | Add check in createAdmissionRequest |
+| 8 | Not all coordination rows are locked | Expiry scheduler doesn't lock admission rows | Add pessimistic locking to expiry query |
+| 9 | Availability search is informational | Search results don't guarantee reservation | Document clearly; allocation rechecks |
+| 10 | Concurrency tests use H2 | H2 is not MySQL | Test against MySQL/Testcontainers for production |
+| 11 | No authentication/authorization | Endpoints are public | Add Spring Security for production |
+| 12 | No blocked-bed release endpoint | BLOCKED → AVAILABLE transition exists but no API | Add unblock endpoint |
 
 
 ---
@@ -1543,13 +2289,13 @@ do not rely on the development default password.
 | HospitalController | Hospital creation and retrieval |
 | WardController | Ward creation/retrieval and listing ward beds |
 | RoomController | Room creation and retrieval |
-| BedController | Bed creation, availability, blocking, maintenance, stats |
+| BedController | Bed creation, availability, blocking, maintenance completion, statistics |
 | AdmissionController | Admission request, reservation, confirmation, discharge, cancellation |
 | BedAllocationEngineImpl | Finds and validates eligible beds (7 rules) |
 | AdmissionServiceImpl | Admission lifecycle and transaction orchestration |
 | WaitingListServiceImpl | Enqueueing and assigning waiting admissions |
 | ReservationExpiryScheduler | Scheduled cleanup of expired reservations |
-| GlobalExceptionHandler | Converts exceptions to HTTP responses |
+| GlobalExceptionHandler | Converts common exceptions to HTTP responses |
 
 
 ---
