@@ -21,6 +21,7 @@
 
 ### 1.1 High-Level Architecture
 
+```text
 +-------------------------------------------------------------------------------------+
 |                              CLIENT / API CONSUMER                                  |
 |                    (Swagger UI, Postman, Frontend Application)                      |
@@ -82,10 +83,11 @@
 |  |bed_status_logs |                                                                 |
 |  +----------------+                                                                 |
 +-------------------------------------------------------------------------------------+
-
+```
 
 ### 1.2 Admission Allocation Flow (Automatic)
 
+```text
 +-------------------------------------------------------------------------------------+
 |  CLIENT: POST /api/v1/admissions/request                                            |
 |  Body: { patientId, patientGender, requiredWardType, requiredBedType,               |
@@ -146,10 +148,11 @@
 |    with status = RESERVED,    |         |                                           |
 |    allocatedBedId = bed.id    |         |                                           |
 +-------------------------------+         +-------------------------------------------+
-
+```
 
 ### 1.3 Bed Eligibility Rules (7 Rules in isBedEligibleForAdmission)
 
+```text
 +-------------------------------------------------------------------------------------+
 |  RULE 1: Status Check                                                               |
 |  bed.status must be AVAILABLE                                                       |
@@ -181,10 +184,11 @@
 |    - If activeAdmission.patientGender != newAdmission.patientGender -> reject       |
 |  (Prevents co-ed placement in shared rooms)                                         |
 +-------------------------------------------------------------------------------------+
-
+```
 
 ### 1.4 Full Bed Lifecycle State Machine
 
+```text
 +-------------------------------------------------------------------------------------+
 |                            BED STATES                                               |
 |                                                                                     |
@@ -199,6 +203,7 @@
 |                    MAINTENANCE -> AVAILABLE                                         |
 |                    BLOCKED -> AVAILABLE                                             |
 +-------------------------------------------------------------------------------------+
+```
 
 Admission -> Bed State Mapping:
 
@@ -215,6 +220,7 @@ Admission -> Bed State Mapping:
 
 ### 1.5 Waiting List Evaluation Flow
 
+```text
 +-------------------------------------------------------------------------------------+
 |  TRIGGER: evaluateWaitingListForBed(releasedBed)                                    |
 |  Called from:                                                                       |
@@ -245,10 +251,11 @@ Admission -> Bed State Mapping:
 |        - Save BedStatusLog (AVAILABLE -> RESERVED, actor=WAITING_LIST_SCHEDULER)    |
 |        - BREAK                                                                      |
 +-------------------------------------------------------------------------------------+
-
+```
 
 ### 1.6 Reservation Expiry Scheduler Flow
 
+```text
 +-------------------------------------------------------------------------------------+
 |  @Scheduled(cron = "${allocation.reservation.cleanup-cron:0 */1 * * * *}")          |
 |  Runs every minute by default                                                       |
@@ -278,10 +285,11 @@ Admission -> Bed State Mapping:
 |        - Save BedStatusLog (RESERVED -> AVAILABLE, actor=EXPIRY_SCHEDULER)          |
 |        - waitingListService.evaluateWaitingListForBed(bed)                          |
 +-------------------------------------------------------------------------------------+
-
+```
 
 ### 1.7 Entity Relationship Diagram
 
+```text
 +-----------------+       +-----------------+       +-----------------+       +-----------------+
 |    Hospital     |       |      Ward       |       |      Room       |       |       Bed       |
 |-----------------|       |-----------------|       |-----------------|       |-----------------|
@@ -320,7 +328,7 @@ Admission -> Bed State Mapping:
 | created_at      |
 | updated_at      |
 +-----------------+
-
+```
 
 ---
 
@@ -328,6 +336,7 @@ Admission -> Bed State Mapping:
 
 ### 2.1 Schema DDL (MySQL 8)
 
+```sql
 -- ============================================================================
 -- Hospital Bed & Resource Allocation Engine - MySQL Schema
 -- Usage: mysql -u root -p < schema.sql
@@ -439,10 +448,11 @@ CREATE TABLE IF NOT EXISTS bed_status_logs (
     CONSTRAINT fk_bed_logs_bed FOREIGN KEY (bed_id) REFERENCES beds(id) ON DELETE CASCADE,
     INDEX idx_bed_logs_bed (bed_id, logged_at)
 ) ENGINE=InnoDB;
-
+```
 
 ### 2.2 Seed Data
 
+```sql
 -- Baseline seed data for immediate testing.
 -- Idempotent: safe to re-run.
 
@@ -465,7 +475,7 @@ FROM rooms r
 JOIN wards w ON w.id = r.ward_id
 JOIN hospitals h ON h.id = w.hospital_id
 WHERE h.code = 'HOSP-ALPHA' AND r.room_number = 'ICU-ROOM-1';
-
+```
 
 ### 2.3 Table Relationships
 
@@ -511,11 +521,13 @@ WHERE h.code = 'HOSP-ALPHA' AND r.room_number = 'ICU-ROOM-1';
 
 ### 3.1 Base URL & Conventions
 
+```text
 Base URL: http://localhost:8080
 
 Headers:
   Content-Type: application/json
   Accept: application/json
+```
 
 Enum values must use exact uppercase names (e.g., ICU, URGENT, FEMALE).
 
@@ -523,19 +535,24 @@ Enum values must use exact uppercase names (e.g., ICU, URGENT, FEMALE).
 ### 3.2 Response Envelope
 
 Success:
+
+```json
 {
   "success": true,
   "message": "Operation successful",
   "data": { }
 }
+```
 
 Error:
+
+```json
 {
   "success": false,
   "message": "Bed not found: 999",
   "data": null
 }
-
+```
 
 ### 3.3 HTTP Status Codes
 
@@ -559,13 +576,18 @@ Error:
 | GET    | /api/v1/hospitals/{hospitalId}   | Get a hospital    |
 
 Create Hospital Body:
+
+```json
 {
   "code": "HOSP-01",
   "name": "City General Hospital",
   "address": "1 Main Street, Tirupati"
 }
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Hospital created successfully",
@@ -576,7 +598,7 @@ Response (201 Created):
     "address": "1 Main Street, Tirupati"
   }
 }
-
+```
 
 ### 3.5 Ward APIs
 
@@ -587,14 +609,19 @@ Response (201 Created):
 | GET    | /api/v1/wards/{wardId}/beds| List beds in a ward    |
 
 Create Ward Body:
+
+```json
 {
   "hospitalId": 1,
   "name": "General Ward",
   "wardType": "GENERAL",
   "genderPolicy": "UNISEX"
 }
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Ward created successfully",
@@ -606,7 +633,7 @@ Response (201 Created):
     "genderPolicy": "UNISEX"
   }
 }
-
+```
 
 ### 3.6 Room APIs
 
@@ -617,13 +644,18 @@ Response (201 Created):
 | GET    | /api/v1/rooms/ward/{wardId}| List rooms in a ward       |
 
 Create Room Body:
+
+```json
 {
   "wardId": 1,
   "roomNumber": "G-101",
   "isolationRoom": false
 }
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Room created successfully",
@@ -637,7 +669,7 @@ Response (201 Created):
     "bedCount": 0
   }
 }
-
+```
 
 ### 3.7 Bed APIs
 
@@ -651,13 +683,18 @@ Response (201 Created):
 | GET    | /api/v1/beds/stats                       | Counts grouped by bed status             |
 
 Create Bed Body:
+
+```json
 {
   "roomId": 1,
   "bedNumber": "G-101-B1",
   "bedType": "STANDARD"
 }
+```
 
 Bed Response:
+
+```json
 {
   "bedId": 1,
   "bedNumber": "G-101-B1",
@@ -671,6 +708,7 @@ Bed Response:
   "wardType": "GENERAL",
   "hospitalId": 1
 }
+```
 
 Availability Search Filters (all optional):
 
@@ -684,16 +722,28 @@ Availability Search Filters (all optional):
 | patientGender     | Filter by the ward's gender policy   |
 
 Example:
+
+```http
 GET /api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE
+```
 
 Block a Bed:
+
+```http
 POST /api/v1/beds/12/block?reason=Equipment%20repair
+```
+
 If reason is omitted, the default is Administrative hold.
 
 Complete Maintenance:
+
+```http
 POST /api/v1/beds/12/maintenance/complete
+```
 
 Bed Statistics Response:
+
+```json
 {
   "success": true,
   "message": "Operation successful",
@@ -705,7 +755,7 @@ Bed Statistics Response:
     "BLOCKED": 1
   }
 }
-
+```
 
 ### 3.8 Admission APIs
 
@@ -720,6 +770,8 @@ Bed Statistics Response:
 | POST   | /api/v1/admissions/{admissionId}/cancel?reason={r}    | Cancel an admission                |
 
 Admission Request Body (NO bed ID):
+
+```json
 {
   "patientId": "PAT-1001",
   "patientGender": "MALE",
@@ -728,8 +780,11 @@ Admission Request Body (NO bed ID):
   "priority": "NORMAL",
   "isolationRequired": false
 }
+```
 
 Response (201 Created) - Automatic Reservation:
+
+```json
 {
   "success": true,
   "message": "Admission processed",
@@ -749,8 +804,11 @@ Response (201 Created) - Automatic Reservation:
     "cancellationReason": null
   }
 }
+```
 
 Response (201 Created) - Waiting List:
+
+```json
 {
   "success": true,
   "message": "Admission processed",
@@ -761,10 +819,11 @@ Response (201 Created) - Waiting List:
     "allocatedBedId": null
   }
 }
-
+```
 
 ### 3.9 API Flow Sequence
 
+```text
 1. POST /api/v1/hospitals                       -> Create hospital
 2. POST /api/v1/wards                           -> Create ward
 3. POST /api/v1/rooms                           -> Create room
@@ -779,7 +838,7 @@ Response (201 Created) - Waiting List:
 9. POST /api/v1/beds/{id}/maintenance/complete  -> Complete maintenance
    -> Bed = AVAILABLE (or RESERVED if waiting list assigns)
 10. GET /api/v1/admissions/{id}                 -> Check waiting admission
-
+```
 
 ---
 
@@ -788,35 +847,49 @@ Response (201 Created) - Waiting List:
 ### 4.1 Request DTOs
 
 CreateHospitalRequest:
+
+```java
 public record CreateHospitalRequest(
     @NotBlank String code,
     @NotBlank String name,
     @NotBlank String address
 ) {}
+```
 
 CreateWardRequest:
+
+```java
 public record CreateWardRequest(
     @NotNull Long hospitalId,
     @NotBlank String name,
     @NotNull WardType wardType,
     @NotNull GenderPolicy genderPolicy
 ) {}
+```
 
 CreateRoomRequest:
+
+```java
 public record CreateRoomRequest(
     @NotNull Long wardId,
     @NotBlank String roomNumber,
     boolean isolationRoom
 ) {}
+```
 
 CreateBedRequest:
+
+```java
 public record CreateBedRequest(
     @NotNull Long roomId,
     @NotBlank String bedNumber,
     @NotNull BedType bedType
 ) {}
+```
 
 AdmissionCreationRequest:
+
+```java
 public record AdmissionCreationRequest(
     @NotBlank String patientId,
     @NotNull PatientGender patientGender,
@@ -825,11 +898,13 @@ public record AdmissionCreationRequest(
     @NotNull AdmissionPriority priority,
     boolean isolationRequired
 ) {}
-
+```
 
 ### 4.2 Response DTOs
 
 ApiResponse<T>:
+
+```java
 public record ApiResponse<T>(boolean success, String message, T data) {
     public static <T> ApiResponse<T> ok(String message, T data) {
         return new ApiResponse<>(true, message, data);
@@ -841,20 +916,25 @@ public record ApiResponse<T>(boolean success, String message, T data) {
 
 HospitalResponse, WardResponse, RoomResponse, BedResponse, AdmissionResponse
 - each is a plain Java record with the fields listed in the schema.
-
+```
 
 ### 4.3 Validation Examples
 
 Invalid Request (blank patientId) -> HTTP 400 with:
+
+```json
 {
   "success": false,
   "message": "Validation Failed",
   "data": { "patientId": "Patient ID is required" }
 }
+```
 
 Invalid Enum Value -> HTTP 400 with:
-"Malformed or unreadable request body. Check enum names and field types."
 
+```text
+"Malformed or unreadable request body. Check enum names and field types."
+```
 
 ---
 
@@ -862,6 +942,7 @@ Invalid Enum Value -> HTTP 400 with:
 
 ### 5.1 BedAllocationEngineImpl - The 7 Eligibility Rules
 
+```java
 @Override
 public boolean isBedEligibleForAdmission(Bed bed, Admission admission) {
     if (bed == null || admission == null) return false;
@@ -914,10 +995,11 @@ public boolean isBedEligibleForAdmission(Bed bed, Admission admission) {
 
     return true;
 }
-
+```
 
 ### 5.2 BedAllocationEngineImpl - allocateBed()
 
+```java
 @Override
 @Transactional
 public Optional<Bed> allocateBed(Admission admission) {
@@ -943,10 +1025,11 @@ public Optional<Bed> allocateBed(Admission admission) {
     }
     return Optional.empty();
 }
-
+```
 
 ### 5.3 AdmissionServiceImpl - createAdmissionRequest()
 
+```java
 @Transactional(isolation = Isolation.READ_COMMITTED)
 public AdmissionResponse createAdmissionRequest(AdmissionCreationRequest request) {
     Admission admission = new Admission(...);
@@ -968,7 +1051,7 @@ public AdmissionResponse createAdmissionRequest(AdmissionCreationRequest request
     }
     return mapToResponse(admission);
 }
-
+```
 
 ### 5.4 - 5.11
 
@@ -1012,6 +1095,7 @@ the original file for each method.
 
 ### 6.2 GlobalExceptionHandler
 
+```java
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -1047,27 +1131,38 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.fail("Internal server error: " + ex.getMessage()));
     }
 }
-
+```
 
 ### 6.3 Error Response Examples
 
 404 Not Found:
+
+```json
 { "success": false, "message": "Bed not found: 999", "data": null }
+```
 
 400 Validation Error:
+
+```json
 { "success": false, "message": "Validation Failed",
   "data": { "patientId": "Patient ID is required" } }
+```
 
 409 Conflict:
+
+```json
 { "success": false,
   "message": "Admission must be in RESERVED state to confirm. Current: WAITING_LIST",
   "data": null }
+```
 
 422 Unprocessable Entity:
+
+```json
 { "success": false,
   "message": "Bed ID 12 is not eligible for this admission request.",
   "data": null }
-
+```
 
 ---
 
@@ -1089,6 +1184,7 @@ public class GlobalExceptionHandler {
 
 BedRepository:
 
+```java
 @Lock(LockModeType.PESSIMISTIC_WRITE)
 @QueryHints({
     @QueryHint(name = "jakarta.persistence.lock.timeout", value = "0"),
@@ -1097,29 +1193,34 @@ BedRepository:
 })
 @Query("SELECT b FROM Bed b WHERE b.id = :id")
 Optional<Bed> findByIdWithPessimisticLock(@Param("id") Long id);
+```
 
 AdmissionRepository:
 
+```java
 @Lock(LockModeType.PESSIMISTIC_WRITE)
 @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "0"))
 @Query("SELECT a FROM Admission a WHERE a.id = :id")
 Optional<Admission> findByIdWithPessimisticLock(@Param("id") Long id);
-
+```
 
 ### 7.3 Optimistic Locking with @Version
 
+```text
 Bed entity:       @Version @Column(nullable = false) private Long version = 0L;
 Admission entity: @Version @Column(nullable = false) private Long version = 0L;
-
+```
 
 ### 7.4 Transaction Isolation
 
+```text
 createAdmissionRequest:  @Transactional(isolation = Isolation.READ_COMMITTED)
 reserveBedManually:      @Transactional(isolation = Isolation.READ_COMMITTED)
-
+```
 
 ### 7.5 Concurrency Flow - Automatic Allocation
 
+```text
 Thread A                          Thread B
 --------                          --------
 allocateBed(admissionA)           allocateBed(admissionB)
@@ -1145,10 +1246,11 @@ allocateBed(admissionA)           allocateBed(admissionB)
   |                                 |
   |                                 +- enqueue(admissionB)
   |                                 |  -> WAITING_LIST
-
+```
 
 ### 7.6 Concurrency Flow - Manual Reservation Race
 
+```text
 Operator A                        Operator B
 ----------                        ----------
 reserveBedManually(42, 12)        reserveBedManually(43, 12)
@@ -1172,12 +1274,13 @@ reserveBedManually(42, 12)        reserveBedManually(43, 12)
   +- admission.setStatus(RESERVED)  |
   +- save + commit                  |
   |  -> LOCK RELEASED               |
-
+```
 
 ### 7.7 Configuration
 
 application.yml:
 
+```yaml
 spring:
   datasource:
     hikari:
@@ -1200,7 +1303,7 @@ allocation:
   reservation:
     timeout-minutes: 15
     cleanup-cron: "0 */1 * * * *"   # every minute
-
+```
 
 ### 7.8 Known Concurrency Limitations
 
@@ -1221,9 +1324,11 @@ allocation:
 
 ### 8.1 Test Class: BedAllocationEngineTest
 
+```text
 Location: src/test/java/com/healthcare/ecosystem/allocation/service/BedAllocationEngineTest.java
 Framework: JUnit 5 + Mockito
 Purpose: Tests the 7 eligibility rules in isolation using mocked repositories.
+```
 
 | # | Test Name                                            | Rule Tested        | Expected                              |
 |---|------------------------------------------------------|--------------------|---------------------------------------|
@@ -1238,6 +1343,7 @@ Purpose: Tests the 7 eligibility rules in isolation using mocked repositories.
 
 Sample Test Code:
 
+```java
 @Test
 @DisplayName("Should reject allocation when ward gender policy mismatches patient gender")
 void shouldRejectWhenGenderMismatchesWardPolicy() {
@@ -1248,7 +1354,7 @@ void shouldRejectWhenGenderMismatchesWardPolicy() {
     boolean eligible = allocationEngine.isBedEligibleForAdmission(femaleBed, maleAdmission);
     assertFalse(eligible, "Male patient must not be admitted into FEMALE_ONLY ward");
 }
-
+```
 
 ### 8.2 Unit Test Coverage Summary
 
@@ -1283,6 +1389,7 @@ void shouldRejectWhenGenderMismatchesWardPolicy() {
 Purpose: Proves the double-allocation race is closed - N concurrent admission
 requests for M physical beds must yield exactly M reservations.
 
+```java
 @Test
 @DisplayName("Race Condition Test: 10 concurrent requests for 1 available bed.")
 void testConcurrentBedAllocationRaceCondition() throws InterruptedException {
@@ -1323,6 +1430,7 @@ void testConcurrentBedAllocationRaceCondition() throws InterruptedException {
     assertEquals(1, reservedCount, "Exactly 1 admission should acquire the RESERVED bed");
     assertEquals(9, waitingCount, "The other 9 must be queued without collision");
 }
+```
 
 Expected Results:
 - 1 admission RESERVED
@@ -1405,6 +1513,7 @@ Expected Results:
 
 src/test/resources/application-test.yml:
 
+```yaml
 spring:
   datasource:
     url: jdbc:h2:mem:hospital_test_db;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL
@@ -1428,16 +1537,18 @@ allocation:
   reservation:
     timeout-minutes: 15
     cleanup-cron: "0 0 0 1 1 *"
-
+```
 
 ### 9.9 Running Tests
 
+```bash
 mvn clean test
 mvn -Dtest=BedAllocationConcurrencyTest test
 mvn -Dtest=ConcurrentManualReservationTest test
 mvn -Dtest=ReservationExpiryIntegrationTest test
 mvn -Dtest=AdmissionLifecycleIntegrationTest test
 mvn -Dtest=BedAvailabilitySearchTest test
+```
 
 Expected: 47 tests across 8 classes, all passing.
 
@@ -1471,6 +1582,7 @@ Each endpoint is annotated with @Operation(summary = "...") for Swagger UI displ
 
 Example from BedController:
 
+```java
 @PostMapping
 @Operation(summary = "Add a new bed to a room")
 public ResponseEntity<ApiResponse<BedResponse>> createBed(@Valid @RequestBody CreateBedRequest request) {
@@ -1488,22 +1600,27 @@ public ResponseEntity<ApiResponse<List<BedResponse>>> searchAvailableBeds(
         @RequestParam(required = false) PatientGender patientGender) {
     // ...
 }
-
+```
 
 ### 10.4 OpenAPI Configuration
 
 pom.xml dependency:
+
+```xml
 <dependency>
     <groupId>org.springdoc</groupId>
     <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
     <version>2.3.0</version>
 </dependency>
+```
 
 application.yml:
+
+```yaml
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
-
+```
 
 ### 10.5 Using Swagger UI
 
@@ -1520,6 +1637,7 @@ springdoc:
 
 ### 11.1 Collection Overview
 
+```text
 Hospital Bed Allocation Engine
 |
 +-- 01 - Hospital
@@ -1556,10 +1674,11 @@ Hospital Bed Allocation Engine
 |
 +-- 06 - Concurrency Demo
     +-- (Newman script for concurrent requests)
-
+```
 
 ### 11.2 Environment Variables
 
+```json
 {
   "base_url": "http://localhost:8080",
   "hospital_id": "1",
@@ -1568,11 +1687,13 @@ Hospital Bed Allocation Engine
   "bed_id": "1",
   "admission_id": "101"
 }
-
+```
 
 ### 11.3 Sample Postman Requests
 
 Create Hospital:
+
+```http
 POST {{base_url}}/api/v1/hospitals
 Content-Type: application/json
 
@@ -1581,8 +1702,11 @@ Content-Type: application/json
   "name": "City General Hospital",
   "address": "1 Main Street, Tirupati"
 }
+```
 
 Create Ward:
+
+```http
 POST {{base_url}}/api/v1/wards
 
 {
@@ -1591,8 +1715,11 @@ POST {{base_url}}/api/v1/wards
   "wardType": "GENERAL",
   "genderPolicy": "UNISEX"
 }
+```
 
 Create Room:
+
+```http
 POST {{base_url}}/api/v1/rooms
 
 {
@@ -1600,8 +1727,11 @@ POST {{base_url}}/api/v1/rooms
   "roomNumber": "G-101",
   "isolationRoom": false
 }
+```
 
 Create Bed:
+
+```http
 POST {{base_url}}/api/v1/beds
 
 {
@@ -1609,11 +1739,17 @@ POST {{base_url}}/api/v1/beds
   "bedNumber": "G-101-B1",
   "bedType": "STANDARD"
 }
+```
 
 Search Available Beds:
+
+```http
 GET {{base_url}}/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE
+```
 
 Request Admission (Automatic):
+
+```http
 POST {{base_url}}/api/v1/admissions/request
 
 {
@@ -1624,24 +1760,37 @@ POST {{base_url}}/api/v1/admissions/request
   "priority": "NORMAL",
   "isolationRequired": false
 }
+```
 
 Confirm Admission:
+
+```http
 POST {{base_url}}/api/v1/admissions/{{admission_id}}/confirm
+```
 
 Discharge Admission:
+
+```http
 POST {{base_url}}/api/v1/admissions/{{admission_id}}/discharge
+```
 
 Complete Maintenance:
+
+```http
 POST {{base_url}}/api/v1/beds/{{bed_id}}/maintenance/complete
+```
 
 Cancel Admission:
-POST {{base_url}}/api/v1/admissions/{{admission_id}}/cancel?reason=Patient%20left
 
+```http
+POST {{base_url}}/api/v1/admissions/{{admission_id}}/cancel?reason=Patient%20left
+```
 
 ### 11.4 Postman Test Scripts
 
 Test: Admission Created Successfully
 
+```javascript
 pm.test("Admission processed", function () {
     pm.response.to.have.status(201);
     var jsonData = pm.response.json();
@@ -1655,15 +1804,17 @@ pm.test("Admission processed", function () {
         pm.expect(jsonData.data.allocatedBedId).to.be.null;
     }
 });
+```
 
 Test: Bed Status After Confirm
 
+```javascript
 pm.test("Bed is OCCUPIED", function () {
     pm.response.to.have.status(200);
     var jsonData = pm.response.json();
     pm.expect(jsonData.data.status).to.eql("ADMITTED");
 });
-
+```
 
 ---
 
@@ -1674,11 +1825,15 @@ pm.test("Bed is OCCUPIED", function () {
 Step 1: Start the Application
 
 # Prerequisites: MySQL 8 running, database created
+
+```bash
 mysql -u root -p < schema.sql
 mvn spring-boot:run
+```
 
 Step 2: Create a Hospital
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/hospitals" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1686,8 +1841,11 @@ curl -i -X POST "http://localhost:8080/api/v1/hospitals" \
     "name": "City General Hospital",
     "address": "1 Main Street, Tirupati"
   }'
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Hospital created successfully",
@@ -1698,9 +1856,11 @@ Response (201 Created):
     "address": "1 Main Street, Tirupati"
   }
 }
+```
 
 Step 3: Create a Ward
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/wards" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1709,8 +1869,11 @@ curl -i -X POST "http://localhost:8080/api/v1/wards" \
     "wardType": "GENERAL",
     "genderPolicy": "UNISEX"
   }'
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Ward created successfully",
@@ -1722,9 +1885,11 @@ Response (201 Created):
     "genderPolicy": "UNISEX"
   }
 }
+```
 
 Step 4: Create a Room
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/rooms" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1732,8 +1897,11 @@ curl -i -X POST "http://localhost:8080/api/v1/rooms" \
     "roomNumber": "G-101",
     "isolationRoom": false
   }'
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Room created successfully",
@@ -1747,9 +1915,11 @@ Response (201 Created):
     "bedCount": 0
   }
 }
+```
 
 Step 5: Create a Bed
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/beds" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1757,8 +1927,11 @@ curl -i -X POST "http://localhost:8080/api/v1/beds" \
     "bedNumber": "G-101-B1",
     "bedType": "STANDARD"
   }'
+```
 
 Response (201 Created):
+
+```json
 {
   "success": true,
   "message": "Bed created successfully",
@@ -1776,12 +1949,17 @@ Response (201 Created):
     "hospitalId": 1
   }
 }
+```
 
 Step 6: Search Available Beds
 
+```bash
 curl -i "http://localhost:8080/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Operation successful",
@@ -1794,9 +1972,11 @@ Response (200 OK):
     }
   ]
 }
+```
 
 Step 7: Request Admission (Automatic Allocation)
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1807,8 +1987,11 @@ curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
     "priority": "NORMAL",
     "isolationRequired": false
   }'
+```
 
 Response (201 Created) - Bed Found:
+
+```json
 {
   "success": true,
   "message": "Admission processed",
@@ -1828,12 +2011,14 @@ Response (201 Created) - Bed Found:
     "cancellationReason": null
   }
 }
+```
 
 Key Observation: The request did NOT include a bedId. The backend automatically
 selected bed ID 1 and returned status: "RESERVED" with allocatedBedId: 1.
 
 Step 8: Submit Second Admission (Same Requirements)
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1844,8 +2029,11 @@ curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
     "priority": "URGENT",
     "isolationRequired": false
   }'
+```
 
 Response (201 Created) - No Bed Available:
+
+```json
 {
   "success": true,
   "message": "Admission processed",
@@ -1856,15 +2044,20 @@ Response (201 Created) - No Bed Available:
     "allocatedBedId": null
   }
 }
+```
 
 Key Observation: The only bed is RESERVED for PAT-1001, so PAT-1002 is
 automatically placed on the WAITING_LIST with priority URGENT (score 200).
 
 Step 9: Confirm First Admission
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/confirm"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Admission confirmed. Bed is now OCCUPIED",
@@ -1876,20 +2069,28 @@ Response (200 OK):
     "reservationExpiresAt": null
   }
 }
+```
 
 Bed Status Check:
+
+```bash
 curl -i "http://localhost:8080/api/v1/beds/1"
 {
   "success": true,
   "message": "Operation successful",
   "data": { "bedId": 1, "status": "OCCUPIED" }
 }
+```
 
 Step 10: Discharge First Admission
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/discharge"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Patient discharged. Bed queued for MAINTENANCE",
@@ -1899,31 +2100,44 @@ Response (200 OK):
     "dischargeTime": "2026-10-07T12:10:00Z"
   }
 }
+```
 
 Bed Status Check:
+
+```json
 {
   "data": { "bedId": 1, "status": "MAINTENANCE" }
 }
+```
 
 Step 11: Complete Maintenance
 
+```bash
 curl -i -X POST "http://localhost:8080/api/v1/beds/1/maintenance/complete"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Bed maintenance completed. Bed is now AVAILABLE",
   "data": { "bedId": 1, "status": "RESERVED" }
 }
+```
 
 Key Observation: The bed status is RESERVED (not AVAILABLE) because the waiting
 list evaluator immediately assigned the bed to PAT-1002 (URGENT priority).
 
 Step 12: Verify Waiting Patient Now Has the Bed
 
+```bash
 curl -i "http://localhost:8080/api/v1/admissions/102"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Operation successful",
@@ -1935,15 +2149,20 @@ Response (200 OK):
     "reservationExpiresAt": "2026-10-07T12:25:00Z"
   }
 }
+```
 
 Key Observation: PAT-1002 has been automatically promoted from WAITING_LIST to
 RESERVED and now holds bed ID 1. The waiting list entry has been removed.
 
 Step 13: Check Bed Statistics
 
+```bash
 curl -i "http://localhost:8080/api/v1/beds/stats"
+```
 
 Response (200 OK):
+
+```json
 {
   "success": true,
   "message": "Operation successful",
@@ -1955,9 +2174,11 @@ Response (200 OK):
     "BLOCKED": 0
   }
 }
+```
 
 Step 14: Verify Audit Trail
 
+```bash
 mysql -u root -p hospital_allocation_db -e "
   SELECT previous_status, new_status, changed_by, reason, logged_at
   FROM bed_status_logs
@@ -1976,14 +2197,20 @@ Output:
 | MAINTENANCE     | AVAILABLE  | MAINTENANCE_SUPERVISOR| Sanitization complete              | 2026-10-07 12:15:00 |
 | AVAILABLE       | RESERVED   | WAITING_LIST_SCHEDULER| Allocated to admission ID: 102     | 2026-10-07 12:15:00 |
 +-----------------+------------+----------------------+-------------------------------------+---------------------+
+```
 
 Step 15: Run Concurrency Test
 
+```bash
 mvn -Dtest=BedAllocationConcurrencyTest test
+```
 
 Expected Output:
+
+```text
 Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
+```
 
 This proves that 10 concurrent requests for 1 bed result in exactly 1
 reservation and 9 waiting list entries - no double-booking.
@@ -2037,6 +2264,7 @@ reservation and 9 waiting list entries - no double-booking.
 
 ### A.1 application.yml (Production)
 
+```yaml
 server:
   port: 8080
   error:
@@ -2079,7 +2307,7 @@ allocation:
   reservation:
     timeout-minutes: 15
     cleanup-cron: "0 */1 * * * *"
-
+```
 
 ### A.2 Environment Variables
 
