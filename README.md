@@ -766,6 +766,7 @@ text
 4. DTOs and Validation
 4.1 Request DTOs
 CreateHospitalRequest
+
 java
 public record CreateHospitalRequest(
     @NotBlank(message = "Hospital code is required")
@@ -783,6 +784,7 @@ public record CreateHospitalRequest(
     String address
 ) {}
 CreateWardRequest
+
 java
 public record CreateWardRequest(
     @NotNull(message = "Hospital ID is required")
@@ -799,6 +801,7 @@ public record CreateWardRequest(
     GenderPolicy genderPolicy
 ) {}
 CreateRoomRequest
+
 java
 public record CreateRoomRequest(
     @NotNull(message = "Ward ID is required")
@@ -811,6 +814,7 @@ public record CreateRoomRequest(
     boolean isolationRoom
 ) {}
 CreateBedRequest
+
 java
 public record CreateBedRequest(
     @NotNull(message = "Room ID is required")
@@ -824,6 +828,7 @@ public record CreateBedRequest(
     BedType bedType
 ) {}
 AdmissionCreationRequest
+
 java
 public record AdmissionCreationRequest(
     @NotBlank(message = "Patient ID is required")
@@ -846,6 +851,7 @@ public record AdmissionCreationRequest(
 ) {}
 4.2 Response DTOs
 ApiResponse<T>
+
 java
 public record ApiResponse<T>(
     boolean success,
@@ -863,6 +869,7 @@ public record ApiResponse<T>(
     }
 }
 HospitalResponse
+
 java
 public record HospitalResponse(
     Long id,
@@ -871,6 +878,7 @@ public record HospitalResponse(
     String address
 ) {}
 WardResponse
+
 java
 public record WardResponse(
     Long id,
@@ -880,6 +888,7 @@ public record WardResponse(
     GenderPolicy genderPolicy
 ) {}
 RoomResponse
+
 java
 public record RoomResponse(
     Long id,
@@ -891,6 +900,7 @@ public record RoomResponse(
     Long bedCount
 ) {}
 BedResponse
+
 java
 public record BedResponse(
     Long bedId,
@@ -906,6 +916,7 @@ public record BedResponse(
     Long hospitalId
 ) {}
 AdmissionResponse
+
 java
 public record AdmissionResponse(
     Long admissionId,
@@ -2050,6 +2061,7 @@ json
 }
 11.3 Sample Postman Requests
 Create Hospital
+
 http
 POST {{base_url}}/api/v1/hospitals
 Content-Type: application/json
@@ -2060,6 +2072,7 @@ Content-Type: application/json
   "address": "1 Main Street, Tirupati"
 }
 Create Ward
+
 http
 POST {{base_url}}/api/v1/wards
 Content-Type: application/json
@@ -2071,6 +2084,7 @@ Content-Type: application/json
   "genderPolicy": "UNISEX"
 }
 Create Room
+
 http
 POST {{base_url}}/api/v1/rooms
 Content-Type: application/json
@@ -2081,6 +2095,7 @@ Content-Type: application/json
   "isolationRoom": false
 }
 Create Bed
+
 http
 POST {{base_url}}/api/v1/beds
 Content-Type: application/json
@@ -2091,9 +2106,11 @@ Content-Type: application/json
   "bedType": "STANDARD"
 }
 Search Available Beds
+
 http
 GET {{base_url}}/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE
 Request Admission (Automatic)
+
 http
 POST {{base_url}}/api/v1/admissions/request
 Content-Type: application/json
@@ -2107,15 +2124,19 @@ Content-Type: application/json
   "isolationRequired": false
 }
 Confirm Admission
+
 http
 POST {{base_url}}/api/v1/admissions/{{admission_id}}/confirm
 Discharge Admission
+
 http
 POST {{base_url}}/api/v1/admissions/{{admission_id}}/discharge
 Complete Maintenance
+
 http
 POST {{base_url}}/api/v1/beds/{{bed_id}}/maintenance/complete
 Cancel Admission
+
 http
 POST {{base_url}}/api/v1/admissions/{{admission_id}}/cancel?reason=Patient%20left
 11.4 Postman Test Scripts
@@ -2148,11 +2169,13 @@ pm.test("Bed is OCCUPIED", function () {
 This walkthrough demonstrates the complete bed allocation lifecycle using curl commands.
 
 Step 1: Start the Application
+
 bash
 # Prerequisites: MySQL 8 running, database created
 mysql -u root -p < schema.sql
 mvn spring-boot:run
 Step 2: Create a Hospital
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/hospitals" \
   -H "Content-Type: application/json" \
@@ -2175,6 +2198,7 @@ json
   }
 }
 Step 3: Create a Ward
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/wards" \
   -H "Content-Type: application/json" \
@@ -2199,6 +2223,7 @@ json
   }
 }
 Step 4: Create a Room
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/rooms" \
   -H "Content-Type: application/json" \
@@ -2224,6 +2249,7 @@ json
   }
 }
 Step 5: Create a Bed
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/beds" \
   -H "Content-Type: application/json" \
@@ -2253,6 +2279,7 @@ json
   }
 }
 Step 6: Search Available Beds
+
 bash
 curl -i "http://localhost:8080/api/v1/beds/available?hospitalId=1&wardId=1&bedType=STANDARD&isolationRequired=false&patientGender=MALE"
 Response (200 OK):
@@ -2278,6 +2305,7 @@ json
   ]
 }
 Step 7: Request Admission (Automatic Allocation)
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
@@ -2314,6 +2342,7 @@ json
 Key Observation: The request did NOT include a bedId. The backend automatically selected bed ID 1 and returned status: "RESERVED" with allocatedBedId: 1.
 
 Step 8: Submit Second Admission (Same Requirements)
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/request" \
   -H "Content-Type: application/json" \
@@ -2350,6 +2379,7 @@ json
 Key Observation: The only bed is RESERVED for PAT-1001, so PAT-1002 is automatically placed on the WAITING_LIST with priority URGENT (score 200).
 
 Step 9: Confirm First Admission
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/confirm"
 Response (200 OK):
@@ -2382,6 +2412,7 @@ json
   }
 }
 Step 10: Discharge First Admission
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/admissions/101/discharge"
 Response (200 OK):
@@ -2408,6 +2439,7 @@ json
   }
 }
 Step 11: Complete Maintenance
+
 bash
 curl -i -X POST "http://localhost:8080/api/v1/beds/1/maintenance/complete"
 Response (200 OK):
@@ -2425,6 +2457,7 @@ json
 Key Observation: The bed status is RESERVED (not AVAILABLE) because the waiting list evaluator immediately assigned the bed to PAT-1002 (URGENT priority).
 
 Step 12: Verify Waiting Patient Now Has the Bed
+
 bash
 curl -i "http://localhost:8080/api/v1/admissions/102"
 Response (200 OK):
@@ -2445,6 +2478,7 @@ json
 Key Observation: PAT-1002 has been automatically promoted from WAITING_LIST to RESERVED and now holds bed ID 1. The waiting list entry has been removed.
 
 Step 13: Check Bed Statistics
+
 bash
 curl -i "http://localhost:8080/api/v1/beds/stats"
 Response (200 OK):
@@ -2462,6 +2496,7 @@ json
   }
 }
 Step 14: Verify Audit Trail
+
 bash
 # Query bed_status_logs table directly in MySQL
 mysql -u root -p hospital_allocation_db -e "
@@ -2484,6 +2519,7 @@ text
 | AVAILABLE       | RESERVED   | WAITING_LIST_SCHEDULER| Allocated from waiting list to admission ID: 102 | 2026-10-07 12:15:00 |
 +-----------------+------------+----------------------+-------------------------------------+---------------------+
 Step 15: Run Concurrency Test
+
 bash
 mvn -Dtest=BedAllocationConcurrencyTest test
 Expected Output:
@@ -2651,6 +2687,5 @@ Search filters	BedAvailabilitySearchTest (12 tests)
 Hospital/Room CRUD	HospitalRoomManagementTest (10 tests)
 Double confirm race	ConcurrentManualReservationTest.doubleConfirmIsRejected
 End of README
-
 This documentation covers all requested sections: Architecture/Flow Diagram, Database Schema, REST APIs, DTOs and Validation, Service-Layer Business Logic, Global Exception Handling, Transaction/Concurrency Implementation, Unit Tests, Integration Tests, Swagger Documentation, Postman Collection, and Final Walkthrough.
 
